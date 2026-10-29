@@ -452,6 +452,70 @@ def download_excel_from_storage(storage_path: str) -> bytes | None:
         return None
 
 
+def extract_images_from_excel(excel_bytes: bytes) -> list[bytes]:
+    """Извлекает встроенные фотографии из листов Excel в исходном порядке."""
+    images: list[bytes] = []
+    try:
+        workbook = openpyxl.load_workbook(io.BytesIO(excel_bytes), data_only=True)
+        for worksheet in workbook.worksheets:
+            for embedded_image in getattr(worksheet, "_images", []):
+                try:
+                    raw = embedded_image._data()
+                    if raw:
+                        # Проверяем, что байты действительно читаются как изображение.
+                        with Image.open(io.BytesIO(raw)) as test_image:
+                            test_image.verify()
+                        images.append(raw)
+                except Exception:
+                    continue
+        workbook.close()
+    except Exception:
+        return []
+    return images
+
+
+@st.dialog("Просмотр фотографии", width="large")
+def show_photo_viewer():
+    """Модальное окно для просмотра и перелистывания фотографий отчета."""
+    photos = st.session_state.get("photo_viewer_images", [])
+    if not photos:
+        st.info("Фотографии не найдены.")
+        return
+
+    index = int(st.session_state.get("photo_viewer_index", 0)) % len(photos)
+    st.session_state.photo_viewer_index = index
+
+    # Диалог занимает около 80% ширины окна приложения; фото не растягивается по высоте.
+    st.markdown(
+        """<style>
+        div[role="dialog"] { width: 80vw !important; max-width: 80vw !important; }
+        div[role="dialog"] img { max-height: 70vh; object-fit: contain; }
+        </style>""",
+        unsafe_allow_html=True,
+    )
+    st.caption(f"Фото {index + 1} из {len(photos)}")
+    st.image(photos[index], use_container_width=True)
+
+    if st.button("✕ Закрыть просмотр", key="photo_viewer_close", use_container_width=True):
+        st.session_state.photo_viewer_open = False
+        st.rerun()
+
+    prev_col, counter_col, next_col = st.columns([1, 2, 1])
+    with prev_col:
+        if st.button("← Назад", key="photo_viewer_prev", use_container_width=True):
+            st.session_state.photo_viewer_index = (index - 1) % len(photos)
+            st.rerun()
+    with counter_col:
+        st.markdown(
+            f"<div style='text-align:center;padding-top:8px'>{index + 1} / {len(photos)}</div>",
+            unsafe_allow_html=True,
+        )
+    with next_col:
+        if st.button("Вперёд →", key="photo_viewer_next", use_container_width=True):
+            st.session_state.photo_viewer_index = (index + 1) % len(photos)
+            st.rerun()
+
+
 if "auth_user" not in st.session_state:
     st.session_state.auth_user = None
 if "reference_spec" not in st.session_state:
@@ -769,32 +833,45 @@ with tab_archive:
                 else:
                     st.info("Для этой записи дополнительные данные отчета не сохранены.")
 
-                # Фото находятся внутри Excel, если они были добавлены при его создании.
-                st.caption(
-                    "Примечание: просмотр показывает данные, сохраненные в базе. "
-                    "Фотографии, встроенные в Excel, можно посмотреть, скачав Excel-файл."
-                )
-
+                # Загружаем Excel из Storage и показываем фотографии, встроенные в отчет.
                 selected_path = _storage_object_path(selected_report.get("excel_url"))
                 if selected_path:
                     selected_cache_key = f"selected_excel_{selected_id}"
-
-                    if st.button(
-                        "Подготовить Excel для скачивания",
-                        key=f"prepare_selected_excel_{selected_id}",
-                    ):
-                        with st.spinner("Загрузка Excel из облака..."):
-                            file_bytes, download_error = download_excel_from_storage(selected_path)
-
-                        if file_bytes:
-                            st.session_state[selected_cache_key] = file_bytes
-                        else:
-                            st.error("Не удалось загрузить Excel.")
-                            if download_error:
-                                st.caption(download_error)
-
                     selected_bytes = st.session_state.get(selected_cache_key)
+
+                    if selected_bytes is None:
+                        with st.spinner("Загрузка фотографий отчета..."):
+                            selected_bytes = download_excel_from_storage(selected_path)
+                        if selected_bytes:
+                            st.session_state[selected_cache_key] = selected_bytes
+
                     if selected_bytes:
+                        photos_cache_key = f"selected_photos_{selected_id}"
+                        if photos_cache_key not in st.session_state:
+                            st.session_state[photos_cache_key] = extract_images_from_excel(selected_bytes)
+
+                        report_photos = st.session_state.get(photos_cache_key, [])
+                        st.markdown("### Фотографии отчета")
+                        if report_photos:
+                            st.caption("Нажмите на миниатюру, чтобы открыть крупное фото. Переключайтесь стрелками в окне просмотра.")
+                            thumb_cols = st.columns(4)
+                            for photo_index, photo_bytes in enumerate(report_photos):
+                                with thumb_cols[photo_index % 4]:
+                                    st.image(photo_bytes, use_container_width=True)
+                                    if st.button(
+                                        f"🔍 Увеличить · {photo_index + 1}",
+                                        key=f"open_report_photo_{selected_id}_{photo_index}",
+                                        use_container_width=True,
+                                    ):
+                                        st.session_state.photo_viewer_images = report_photos
+                                        st.session_state.photo_viewer_index = photo_index
+                                        st.session_state.photo_viewer_open = True
+
+                            if st.session_state.get("photo_viewer_open") and st.session_state.get("photo_viewer_images"):
+                                show_photo_viewer()
+                        else:
+                            st.caption("В Excel этого отчета встроенные фотографии не найдены.")
+
                         st.download_button(
                             "📥 Скачать Excel этого отчета",
                             data=selected_bytes,
@@ -805,6 +882,8 @@ with tab_archive:
                             mime=EXCEL_MIME,
                             key=f"download_selected_excel_{selected_id}",
                         )
+                    else:
+                        st.warning("Не удалось загрузить Excel из облака, поэтому фотографии пока недоступны.")
                 else:
                     st.info("Для этого отчета Excel-файл в облачном хранилище не найден.")
 

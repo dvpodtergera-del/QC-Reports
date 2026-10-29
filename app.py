@@ -603,6 +603,142 @@ with tab_archive:
                 if not isinstance(report_data, dict):
                     report_data = {}
 
+                # Режим редактирования конкретного отчета
+                edit_state_key = f"editing_report_{selected_id}"
+                if edit_state_key not in st.session_state:
+                    st.session_state[edit_state_key] = False
+
+                edit_col, _ = st.columns([2, 5])
+                if not st.session_state[edit_state_key]:
+                    if edit_col.button(
+                        "✏️ Редактировать отчет",
+                        key=f"start_edit_{selected_id}",
+                        use_container_width=True,
+                    ):
+                        st.session_state[edit_state_key] = True
+                        st.rerun()
+
+                if st.session_state[edit_state_key]:
+                    st.markdown("### Редактирование отчета")
+                    st.caption(
+                        "Изменения сохраняются в базе данных. Уже созданный Excel-файл "
+                        "останется прежним, пока не будет сформирован заново."
+                    )
+
+                    with st.form(key=f"edit_report_form_{selected_id}"):
+                        edit_c1, edit_c2 = st.columns(2)
+                        with edit_c1:
+                            edited_report_no = st.text_input(
+                                "Номер отчета",
+                                value=str(selected_report.get("report_no") or ""),
+                            )
+                            edited_client = st.text_input(
+                                "Клиент / Заказчик",
+                                value=str(selected_report.get("client_name") or report_data.get("client_name") or ""),
+                            )
+                            edited_supplier = st.text_input(
+                                "Фабрика / Поставщик",
+                                value=str(selected_report.get("supplier_name") or report_data.get("supplier_name") or ""),
+                            )
+                            edited_order = st.text_input(
+                                "Номер заказа",
+                                value=str(selected_report.get("order_no") or report_data.get("order_no") or ""),
+                            )
+                            edited_item = st.text_input(
+                                "Наименование товара",
+                                value=str(selected_report.get("item_name") or report_data.get("item_name") or ""),
+                            )
+                        with edit_c2:
+                            edited_sku = st.text_input(
+                                "Артикул / SKU",
+                                value=str(selected_report.get("sku") or report_data.get("sku") or ""),
+                            )
+                            edited_date = st.text_input(
+                                "Дата инспекции (ГГГГ-ММ-ДД)",
+                                value=str(selected_report.get("inspection_date") or report_data.get("inspection_date") or ""),
+                            )
+                            status_options = ["PASSED", "PENDING", "REJECTED"]
+                            current_status = str(selected_report.get("result_status") or report_data.get("result_status") or "PENDING").upper()
+                            if current_status not in status_options:
+                                current_status = "PENDING"
+                            edited_status = st.selectbox(
+                                "Итог проверки",
+                                status_options,
+                                index=status_options.index(current_status),
+                            )
+
+                        edited_comments = st.text_area(
+                            "Комментарии и заключение",
+                            value=str(report_data.get("comments") or ""),
+                            height=160,
+                        )
+
+                        save_col, cancel_col = st.columns(2)
+                        save_changes = save_col.form_submit_button(
+                            "💾 Сохранить изменения",
+                            type="primary",
+                            use_container_width=True,
+                        )
+                        cancel_changes = cancel_col.form_submit_button(
+                            "Отмена",
+                            use_container_width=True,
+                        )
+
+                    if cancel_changes:
+                        st.session_state[edit_state_key] = False
+                        st.rerun()
+
+                    if save_changes:
+                        from datetime import date as _date
+                        try:
+                            # Проверяем формат даты, если дата указана.
+                            normalized_date = edited_date.strip()
+                            if normalized_date:
+                                _date.fromisoformat(normalized_date)
+
+                            updated_report_data = dict(report_data)
+                            updated_report_data.update({
+                                "report_no": edited_report_no.strip(),
+                                "client_name": edited_client.strip(),
+                                "supplier_name": edited_supplier.strip(),
+                                "order_no": edited_order.strip(),
+                                "item_name": edited_item.strip(),
+                                "sku": edited_sku.strip(),
+                                "inspection_date": normalized_date,
+                                "result_status": edited_status,
+                                "comments": edited_comments,
+                            })
+
+                            update_fields = {
+                                "report_no": edited_report_no.strip(),
+                                "client_name": edited_client.strip(),
+                                "supplier_name": edited_supplier.strip(),
+                                "order_no": edited_order.strip(),
+                                "item_name": edited_item.strip(),
+                                "sku": edited_sku.strip(),
+                                "inspection_date": normalized_date or None,
+                                "result_status": edited_status,
+                                "report_data": updated_report_data,
+                            }
+
+                            (
+                                supabase.table("reports")
+                                .update(update_fields)
+                                .eq("id", selected_id)
+                                .eq("inspector_id", st.session_state.auth_user.id)
+                                .execute()
+                            )
+
+                            st.session_state[edit_state_key] = False
+                            st.success("Изменения сохранены.")
+                            st.rerun()
+
+                        except ValueError:
+                            st.error("Неверный формат даты. Используй ГГГГ-ММ-ДД, например 2026-10-29.")
+                        except Exception as e:
+                            st.error("Не удалось сохранить изменения. Проверь права UPDATE в Supabase.")
+                            st.caption(str(e))
+
                 # Показываем актуальные поля записи из таблицы, а также сохраненные детали.
                 st.markdown("### Основная информация")
                 left, right = st.columns(2)

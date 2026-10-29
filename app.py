@@ -501,11 +501,6 @@ def show_photo_viewer():
 
     if st.button("✕ Закрыть просмотр", key="photo_viewer_close", use_container_width=True):
         st.session_state.photo_viewer_open = False
-        try:
-            if "photo_view" in st.query_params:
-                del st.query_params["photo_view"]
-        except Exception:
-            pass
         st.rerun()
 
     prev_col, counter_col, next_col = st.columns([1, 2, 1])
@@ -739,11 +734,6 @@ with tab_archive:
             if st.button("← Назад в архив", key="close_report_view"):
                 st.session_state.selected_report_id = None
                 st.session_state.photo_viewer_open = False
-                try:
-                    if "photo_view" in st.query_params:
-                        del st.query_params["photo_view"]
-                except Exception:
-                    pass
                 st.rerun()
 
             report_data = selected_report.get("report_data") or {}
@@ -943,36 +933,20 @@ with tab_archive:
                     report_photos = st.session_state.get(photos_cache_key, [])
                     st.markdown("### Фотографии отчета")
                     if report_photos:
-                        st.caption("Нажмите прямо на фотографию, чтобы увеличить её. Переключение — стрелками в окне просмотра.")
+                        st.caption("Нажмите на фотографию, чтобы открыть её в увеличенном просмотре.")
                         thumb_cols = st.columns(4)
-                        requested_photo = st.query_params.get("photo_view")
                         for photo_index, photo_bytes in enumerate(report_photos):
                             with thumb_cols[photo_index % 4]:
-                                encoded = base64.b64encode(photo_bytes).decode("ascii")
-                                mime = "image/png" if photo_bytes[:8] == b"\x89PNG\r\n\x1a\n" else "image/jpeg"
-                                target = f"{selected_id}:{photo_index}"
-                                st.markdown(
-                                    f"""<a href="?photo_view={target}" target="_self" style="display:block;cursor:zoom-in;">
-                                    <img src="data:{mime};base64,{encoded}" alt="Фото {photo_index + 1}"
-                                    style="width:100%;height:150px;object-fit:cover;border-radius:8px;border:1px solid #d1d5db;" />
-                                    </a><div style="text-align:center;font-size:12px;color:#64748b;margin-top:4px">Фото {photo_index + 1}</div>""",
-                                    unsafe_allow_html=True,
+                                # Используем встроенный просмотр Streamlit вместо HTML-ссылки
+                                # с query-параметром. Такая ссылка могла перезагрузить приложение
+                                # и сбросить состояние авторизации/выбранного отчёта.
+                                st.image(
+                                    photo_bytes,
+                                    caption=f"Фото {photo_index + 1}",
+                                    use_container_width=True,
+                                    on_click="view",
                                 )
 
-                        if requested_photo:
-                            try:
-                                requested_report_id, requested_index = str(requested_photo).split(":", 1)
-                                if requested_report_id == str(selected_id):
-                                    requested_index = int(requested_index)
-                                    if 0 <= requested_index < len(report_photos):
-                                        st.session_state.photo_viewer_images = report_photos
-                                        st.session_state.photo_viewer_index = requested_index
-                                        st.session_state.photo_viewer_open = True
-                            except (ValueError, TypeError):
-                                pass
-
-                        if st.session_state.get("photo_viewer_open") and st.session_state.get("photo_viewer_images"):
-                            show_photo_viewer()
                     else:
                         st.caption("В Excel этого отчета встроенные фотографии не найдены.")
 

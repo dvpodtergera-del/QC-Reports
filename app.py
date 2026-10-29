@@ -34,7 +34,7 @@ def apply_range_style(ws, min_col, min_row, max_col, max_row, border=None, fill=
                 cell.fill = fill
 
 # ==============================================================================
-# МОДУЛЬ ГЕНЕРАЦИИ EXCEL (БЕЗ ПОДПИСЕЙ, ЧИСТАЯ HD-ФОТОСЕТКА)
+# МОДУЛЬ ГЕНЕРАЦИИ EXCEL (HD-ФОТОСЕТКА С ПОДПИСЯМИ СЕКЦИЙ)
 # ==============================================================================
 def create_full_qc_report(
     report_data: dict, 
@@ -216,7 +216,7 @@ def create_full_qc_report(
             curr_row += 1
         curr_row += 1
 
-    # 4. Фотоматериалы (HD 1200x675, БЕЗ подписей, чистое позиционирование)
+    # 4. Фотоматериалы (HD 1200x675, с подписями секций и компактными строками)
     section_titles = {
         "products": "PRODUCT WORKMANSHIP PHOTOS",
         "packing": "PACKAGING & CARTON DETAILS",
@@ -228,6 +228,9 @@ def create_full_qc_report(
         (2, 5, 'B'),  # Левая позиция: B..E
         (6, 9, 'F')   # Правая позиция: F..I
     ]
+    photo_display_w = 400
+    photo_display_h = 168
+    photo_row_h = 130
 
     for s_key, s_label in section_titles.items():
         photos = photos_by_section.get(s_key, [])
@@ -235,7 +238,7 @@ def create_full_qc_report(
             continue
 
         ws.merge_cells(start_row=curr_row, start_column=2, end_row=curr_row, end_column=9)
-        ws.row_dimensions[curr_row].height = 22
+        ws.row_dimensions[curr_row].height = 20
         t_cell = ws.cell(row=curr_row, column=2, value=s_label)
         t_cell.fill = PatternFill(start_color=c_header, fill_type="solid")
         t_cell.font = Font(name="Calibri", size=10, bold=True, color="FFFFFF")
@@ -245,7 +248,9 @@ def create_full_qc_report(
 
         for i in range(0, len(photos), 2):
             photo_row = curr_row
-            ws.row_dimensions[photo_row].height = 195
+            caption_row = curr_row + 1
+            ws.row_dimensions[photo_row].height = photo_row_h
+            ws.row_dimensions[caption_row].height = 16
 
             for slot_idx, (sc, ec, col_letter) in enumerate(slots):
                 p_idx = i + slot_idx
@@ -277,12 +282,18 @@ def create_full_qc_report(
                     img_buf.seek(0)
 
                     xl_img = OpenPyXLImage(img_buf)
-                    xl_img.width = 440
-                    xl_img.height = 250
+                    xl_img.width = photo_display_w
+                    xl_img.height = photo_display_h
                     ws.add_image(xl_img, f"{col_letter}{photo_row}")
 
-            curr_row += 1
-        curr_row += 1
+                    ws.merge_cells(start_row=caption_row, start_column=sc, end_row=caption_row, end_column=ec)
+                    cap_text = p_info.get("caption") or f"{s_label} — {p_idx + 1}"
+                    cap_cell = ws.cell(row=caption_row, column=sc, value=cap_text)
+                    cap_cell.font = Font(name="Calibri", size=8, italic=True, color=c_sub)
+                    cap_cell.alignment = Alignment(horizontal="center", vertical="center")
+                    apply_range_style(ws, sc, caption_row, ec, caption_row, border=thin_border)
+
+            curr_row += 2
 
     # 5. Общий итог проверки в Excel (Выводы и замечания)
     ws.merge_cells(start_row=curr_row, start_column=2, end_row=curr_row, end_column=9)
@@ -456,22 +467,52 @@ def download_excel_from_storage(storage_path: str) -> bytes | None:
         return None
 
 
-def extract_images_from_excel(excel_bytes: bytes) -> list[bytes]:
-    """Извлекает встроенные фотографии из листов Excel в исходном порядке."""
-    images: list[bytes] = []
+PHOTO_SECTION_TITLES = {
+    "PRODUCT WORKMANSHIP PHOTOS": "Продукция",
+    "PACKAGING & CARTON DETAILS": "Упаковка и маркировка",
+    "LABELS & BARCODES VERIFICATION": "Стикеры и штрихкоды",
+    "DEFECT DETAILS & LOG": "Дефекты",
+}
+
+
+def extract_images_from_excel(excel_bytes: bytes) -> list[dict]:
+    """Извлекает фотографии Excel вместе с подписью секции, если она есть на листе."""
+    images: list[dict] = []
     try:
         workbook = openpyxl.load_workbook(io.BytesIO(excel_bytes), data_only=True)
         for worksheet in workbook.worksheets:
+            section_rows: list[tuple[int, str]] = []
+            for row in worksheet.iter_rows(min_col=2, max_col=2):
+                for cell in row:
+                    raw_title = str(cell.value or "").strip()
+                    if raw_title in PHOTO_SECTION_TITLES:
+                        section_rows.append((cell.row, PHOTO_SECTION_TITLES[raw_title]))
+
+            pending: list[tuple[int, bytes]] = []
             for embedded_image in getattr(worksheet, "_images", []):
                 try:
                     raw = embedded_image._data()
-                    if raw:
-                        # Проверяем, что байты действительно читаются как изображение.
-                        with Image.open(io.BytesIO(raw)) as test_image:
-                            test_image.verify()
-                        images.append(raw)
+                    if not raw:
+                        continue
+                    with Image.open(io.BytesIO(raw)) as test_image:
+                        test_image.verify()
+                    anchor = getattr(embedded_image, "anchor", None)
+                    from_cell = getattr(anchor, "_from", None)
+                    img_row = int(getattr(from_cell, "row", 0) or 0) + 1
+                    pending.append((img_row, raw))
                 except Exception:
                     continue
+
+            pending.sort(key=lambda item: item[0])
+            counters: dict[str, int] = {}
+            for img_row, raw in pending:
+                section = ""
+                for header_row, header_title in section_rows:
+                    if header_row <= img_row:
+                        section = header_title
+                counters[section] = counters.get(section, 0) + 1
+                label = f"{section} — {counters[section]}" if section else f"Фото {counters[section]}"
+                images.append({"bytes": raw, "label": label, "section": section})
         workbook.close()
     except Exception:
         return []
@@ -520,37 +561,57 @@ def show_photo_viewer():
             st.rerun()
 
 
-def render_clickable_photo_gallery(photos: list[bytes], height: int = 680) -> None:
+def render_clickable_photo_gallery(photos: list, height: int | None = None) -> None:
     """Кликабельная галерея с увеличением и переключением стрелками."""
     if not photos:
         st.caption("Фотографии не найдены.")
         return
     items = []
-    for i, raw in enumerate(photos):
+    for i, photo in enumerate(photos):
+        if isinstance(photo, dict):
+            raw = photo.get("bytes")
+            label = str(photo.get("label") or f"Фото {i + 1}")
+            section = str(photo.get("section") or "")
+        else:
+            raw = photo
+            label = f"Фото {i + 1}"
+            section = ""
+        if not raw:
+            continue
         try:
             with Image.open(io.BytesIO(raw)) as im:
                 fmt = (im.format or "JPEG").upper()
             mime = "image/png" if fmt == "PNG" else "image/webp" if fmt == "WEBP" else "image/jpeg"
-            items.append({"src": "data:" + mime + ";base64," + base64.b64encode(raw).decode("ascii"), "label": f"Фото {i + 1}"})
+            items.append({
+                "src": "data:" + mime + ";base64," + base64.b64encode(raw).decode("ascii"),
+                "label": label,
+                "section": section,
+            })
         except Exception:
             continue
     if not items:
         st.caption("Не удалось подготовить фотографии для просмотра.")
         return
     import json
+    import math
+    n_sections = len({item["section"] for item in items if item["section"]})
+    photo_rows = max(1, math.ceil(len(items) / 4))
+    if height is None:
+        height = min(560, 28 + n_sections * 26 + photo_rows * 138)
     gallery_json = json.dumps(items, ensure_ascii=False).replace("</", "<\\/")
     html = f'''<!doctype html><html><head><meta charset="utf-8"><style>
 *{{box-sizing:border-box}} body{{margin:0;font-family:Arial,sans-serif;color:#f5f5f5;background:transparent}}
-.gallery{{height:{height-10}px;overflow:auto;display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;padding:4px}}
+.gallery{{height:{height-8}px;overflow:auto;display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px 8px;padding:2px;align-content:start}}
+.sec{{grid-column:1/-1;font-size:13px;font-weight:700;color:#e5e7eb;padding:4px 2px 0;margin:0}}
 .thumb{{border:0;background:transparent;color:inherit;cursor:pointer;text-align:center;padding:0;min-width:0}}
-.thumb img{{width:100%;height:125px;object-fit:cover;border-radius:8px;display:block;background:#222}}
-.thumb span{{display:block;font-size:13px;padding-top:5px;color:#b7b7b7}}
+.thumb img{{width:100%;height:110px;object-fit:cover;border-radius:8px;display:block;background:#222}}
+.thumb span{{display:block;font-size:12px;padding-top:3px;color:#b7b7b7}}
 .overlay{{display:none;position:absolute;inset:0;background:rgba(8,8,12,.97);z-index:99;padding:16px;flex-direction:column;align-items:center;justify-content:center}}
 .overlay.open{{display:flex}} .top{{width:100%;display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:10px}}
 .action{{border:1px solid #666;border-radius:8px;padding:9px 13px;background:#222;color:white;cursor:pointer;font-size:15px}}
 .photo-wrap{{display:flex;align-items:center;justify-content:center;gap:12px;width:100%;height:calc(100% - 45px);min-height:0}}
 .big{{max-width:calc(100% - 110px);max-height:100%;object-fit:contain;border-radius:5px}} .arrow{{font-size:25px;min-width:42px;padding:10px 5px}}
-@media(max-width:600px){{.gallery{{grid-template-columns:repeat(2,minmax(0,1fr))}}.thumb img{{height:110px}}.big{{max-width:calc(100% - 70px)}}.arrow{{min-width:30px}}}}
+@media(max-width:600px){{.gallery{{grid-template-columns:repeat(2,minmax(0,1fr))}}.thumb img{{height:96px}}.big{{max-width:calc(100% - 70px)}}.arrow{{min-width:30px}}}}
 </style></head><body><div class="gallery" id="gallery"></div>
 <div class="overlay" id="overlay" role="dialog" aria-modal="true"><div class="top"><span id="counter">Фото 1 из {len(items)}</span><button class="action" id="close">✕ Закрыть</button></div>
 <div class="photo-wrap"><button class="action arrow" id="prev">←</button><img class="big" id="big" alt="Увеличенная фотография"><button class="action arrow" id="next">→</button></div></div>
@@ -558,7 +619,16 @@ def render_clickable_photo_gallery(photos: list[bytes], height: int = 680) -> No
 const photos = {gallery_json}; let current = 0;
 const gallery=document.getElementById('gallery'), overlay=document.getElementById('overlay'), big=document.getElementById('big'), counter=document.getElementById('counter');
 function show(i){{current=(i+photos.length)%photos.length;big.src=photos[current].src;counter.textContent=`Фото ${{current+1}} из ${{photos.length}}`;overlay.classList.add('open')}}
-photos.forEach((p,i)=>{{const b=document.createElement('button');b.className='thumb';b.type='button';const img=document.createElement('img');img.alt=p.label;img.src=p.src;const label=document.createElement('span');label.textContent=p.label;b.appendChild(img);b.appendChild(label);b.addEventListener('click',()=>show(i));gallery.appendChild(b)}});
+let lastSection = null;
+photos.forEach((p,i)=>{{
+  if(p.section && p.section !== lastSection){{
+    const h=document.createElement('div'); h.className='sec'; h.textContent=p.section; gallery.appendChild(h); lastSection=p.section;
+  }}
+  const b=document.createElement('button');b.className='thumb';b.type='button';
+  const img=document.createElement('img');img.alt=p.label;img.src=p.src;
+  const label=document.createElement('span');label.textContent=p.label;
+  b.appendChild(img);b.appendChild(label);b.addEventListener('click',()=>show(i));gallery.appendChild(b);
+}});
 document.getElementById('close').addEventListener('click',()=>overlay.classList.remove('open'));
 document.getElementById('prev').addEventListener('click',()=>show(current-1));document.getElementById('next').addEventListener('click',()=>show(current+1));
 document.addEventListener('keydown',e=>{{if(!overlay.classList.contains('open'))return;if(e.key==='Escape')overlay.classList.remove('open');if(e.key==='ArrowLeft')show(current-1);if(e.key==='ArrowRight')show(current+1)}});
@@ -748,7 +818,7 @@ with tab_archive:
                             use_container_width=True,
                         ):
                             with st.spinner("Загрузка Excel из облака..."):
-                                file_bytes, download_error = download_excel_from_storage(storage_path)
+                                file_bytes = download_excel_from_storage(storage_path)
 
                             if file_bytes:
                                 st.session_state[f"arch_excel_{rid}"] = file_bytes
@@ -758,8 +828,6 @@ with tab_archive:
                                 )
                             else:
                                 st.warning("Не удалось получить Excel из облачного хранилища.")
-                                if download_error:
-                                    st.caption(download_error)
 
                         cached = st.session_state.get(f"arch_excel_{rid}")
                         if cached:
@@ -952,13 +1020,6 @@ with tab_archive:
                 st.write(comments)
             else:
                 st.caption("Комментарии в сохраненных данных отсутствуют.")
-
-            st.markdown("### Дополнительные данные")
-            if report_data:
-                with st.expander("Показать все сохраненные данные отчета"):
-                    st.json(report_data)
-            else:
-                st.info("Для этой записи дополнительные данные отчета не сохранены.")
 
             # Загружаем Excel из Storage и показываем фотографии, встроенные в отчет.
             selected_path = _storage_object_path(selected_report.get("excel_url"))
@@ -1163,7 +1224,10 @@ with tab_new:
                     with preview_cols[idx % 4]:
                         st.image(fl, use_container_width=True)
                     
-                    photos_data[sec_key].append({"bytes": fl.getvalue()})
+                    photos_data[sec_key].append({
+                        "bytes": fl.getvalue(),
+                        "caption": f"{sec_title} — {idx + 1}",
+                    })
             st.divider()
 
     # 4. Комментарии инспектора

@@ -8,6 +8,7 @@ import uuid
 from datetime import datetime
 import base64
 import streamlit as st
+import streamlit.components.v1 as components
 from supabase import create_client, Client
 from PIL import Image, ImageOps
 import openpyxl
@@ -519,6 +520,52 @@ def show_photo_viewer():
             st.rerun()
 
 
+def render_clickable_photo_gallery(photos: list[bytes], height: int = 680) -> None:
+    """Кликабельная галерея с увеличением и переключением стрелками."""
+    if not photos:
+        st.caption("Фотографии не найдены.")
+        return
+    items = []
+    for i, raw in enumerate(photos):
+        try:
+            with Image.open(io.BytesIO(raw)) as im:
+                fmt = (im.format or "JPEG").upper()
+            mime = "image/png" if fmt == "PNG" else "image/webp" if fmt == "WEBP" else "image/jpeg"
+            items.append({"src": "data:" + mime + ";base64," + base64.b64encode(raw).decode("ascii"), "label": f"Фото {i + 1}"})
+        except Exception:
+            continue
+    if not items:
+        st.caption("Не удалось подготовить фотографии для просмотра.")
+        return
+    import json
+    gallery_json = json.dumps(items, ensure_ascii=False).replace("</", "<\\/")
+    html = f'''<!doctype html><html><head><meta charset="utf-8"><style>
+*{{box-sizing:border-box}} body{{margin:0;font-family:Arial,sans-serif;color:#f5f5f5;background:transparent}}
+.gallery{{height:{height-10}px;overflow:auto;display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;padding:4px}}
+.thumb{{border:0;background:transparent;color:inherit;cursor:pointer;text-align:center;padding:0;min-width:0}}
+.thumb img{{width:100%;height:125px;object-fit:cover;border-radius:8px;display:block;background:#222}}
+.thumb span{{display:block;font-size:13px;padding-top:5px;color:#b7b7b7}}
+.overlay{{display:none;position:absolute;inset:0;background:rgba(8,8,12,.97);z-index:99;padding:16px;flex-direction:column;align-items:center;justify-content:center}}
+.overlay.open{{display:flex}} .top{{width:100%;display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:10px}}
+.action{{border:1px solid #666;border-radius:8px;padding:9px 13px;background:#222;color:white;cursor:pointer;font-size:15px}}
+.photo-wrap{{display:flex;align-items:center;justify-content:center;gap:12px;width:100%;height:calc(100% - 45px);min-height:0}}
+.big{{max-width:calc(100% - 110px);max-height:100%;object-fit:contain;border-radius:5px}} .arrow{{font-size:25px;min-width:42px;padding:10px 5px}}
+@media(max-width:600px){{.gallery{{grid-template-columns:repeat(2,minmax(0,1fr))}}.thumb img{{height:110px}}.big{{max-width:calc(100% - 70px)}}.arrow{{min-width:30px}}}}
+</style></head><body><div class="gallery" id="gallery"></div>
+<div class="overlay" id="overlay" role="dialog" aria-modal="true"><div class="top"><span id="counter">Фото 1 из {len(items)}</span><button class="action" id="close">✕ Закрыть</button></div>
+<div class="photo-wrap"><button class="action arrow" id="prev">←</button><img class="big" id="big" alt="Увеличенная фотография"><button class="action arrow" id="next">→</button></div></div>
+<script>
+const photos = {gallery_json}; let current = 0;
+const gallery=document.getElementById('gallery'), overlay=document.getElementById('overlay'), big=document.getElementById('big'), counter=document.getElementById('counter');
+function show(i){{current=(i+photos.length)%photos.length;big.src=photos[current].src;counter.textContent=`Фото ${{current+1}} из ${{photos.length}}`;overlay.classList.add('open')}}
+photos.forEach((p,i)=>{{const b=document.createElement('button');b.className='thumb';b.type='button';const img=document.createElement('img');img.alt=p.label;img.src=p.src;const label=document.createElement('span');label.textContent=p.label;b.appendChild(img);b.appendChild(label);b.addEventListener('click',()=>show(i));gallery.appendChild(b)}});
+document.getElementById('close').addEventListener('click',()=>overlay.classList.remove('open'));
+document.getElementById('prev').addEventListener('click',()=>show(current-1));document.getElementById('next').addEventListener('click',()=>show(current+1));
+document.addEventListener('keydown',e=>{{if(!overlay.classList.contains('open'))return;if(e.key==='Escape')overlay.classList.remove('open');if(e.key==='ArrowLeft')show(current-1);if(e.key==='ArrowRight')show(current+1)}});
+</script></body></html>'''
+    components.html(html, height=height, scrolling=False)
+
+
 def _make_report_number() -> str:
     """Читаемый уникальный номер отчёта: QC-YYYYMMDD-HHMMSS-XXXX."""
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -933,19 +980,8 @@ with tab_archive:
                     report_photos = st.session_state.get(photos_cache_key, [])
                     st.markdown("### Фотографии отчета")
                     if report_photos:
-                        st.caption("Нажмите на фотографию, чтобы открыть её в увеличенном просмотре.")
-                        thumb_cols = st.columns(4)
-                        for photo_index, photo_bytes in enumerate(report_photos):
-                            with thumb_cols[photo_index % 4]:
-                                # Используем встроенный просмотр Streamlit вместо HTML-ссылки
-                                # с query-параметром. Такая ссылка могла перезагрузить приложение
-                                # и сбросить состояние авторизации/выбранного отчёта.
-                                st.image(
-                                    photo_bytes,
-                                    caption=f"Фото {photo_index + 1}",
-                                    use_container_width=True,
-                                    on_click="view",
-                                )
+                        st.caption("Нажмите непосредственно на фотографию. В увеличенном просмотре доступны стрелки ← и →, а также клавиши клавиатуры.")
+                        render_clickable_photo_gallery(report_photos)
 
                     else:
                         st.caption("В Excel этого отчета встроенные фотографии не найдены.")

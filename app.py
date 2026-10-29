@@ -216,7 +216,7 @@ def create_full_qc_report(
             curr_row += 1
         curr_row += 1
 
-    # 4. Фотоматериалы (HD 1200x675, с подписями секций и компактными строками)
+    # 4. Фотоматериалы: три фотографии в ряд, сгруппированные по секциям
     section_titles = {
         "products": "PRODUCT WORKMANSHIP PHOTOS",
         "packing": "PACKAGING & CARTON DETAILS",
@@ -224,29 +224,32 @@ def create_full_qc_report(
         "defects": "DEFECT DETAILS & LOG"
     }
 
+    # Три равных фото-слота: B:D, E:G, H:J.
+    ws.column_dimensions["J"].width = 15
     slots = [
-        (2, 5, 'B'),  # Левая позиция: B..E
-        (6, 9, 'F')   # Правая позиция: F..I
+        (2, 4, 'B'),
+        (5, 7, 'E'),
+        (8, 10, 'H'),
     ]
-    photo_display_w = 400
-    photo_display_h = 168
-    photo_row_h = 130
+    photo_display_w = 270
+    photo_display_h = 152
+    photo_row_h = 116
 
     for s_key, s_label in section_titles.items():
         photos = photos_by_section.get(s_key, [])
         if not photos:
             continue
 
-        ws.merge_cells(start_row=curr_row, start_column=2, end_row=curr_row, end_column=9)
+        ws.merge_cells(start_row=curr_row, start_column=2, end_row=curr_row, end_column=10)
         ws.row_dimensions[curr_row].height = 20
         t_cell = ws.cell(row=curr_row, column=2, value=s_label)
         t_cell.fill = PatternFill(start_color=c_header, fill_type="solid")
         t_cell.font = Font(name="Calibri", size=10, bold=True, color="FFFFFF")
         t_cell.alignment = Alignment(horizontal="left", vertical="center", indent=1)
-        apply_range_style(ws, 2, curr_row, 9, curr_row, border=thin_border)
+        apply_range_style(ws, 2, curr_row, 10, curr_row, border=thin_border)
         curr_row += 1
 
-        for i in range(0, len(photos), 2):
+        for i in range(0, len(photos), 3):
             photo_row = curr_row
             caption_row = curr_row + 1
             ws.row_dimensions[photo_row].height = photo_row_h
@@ -468,11 +471,10 @@ def download_excel_from_storage(storage_path: str) -> bytes | None:
 
 
 def append_photos_to_existing_excel(excel_bytes: bytes, new_photos: list[tuple[str, bytes]], report_data: dict) -> bytes:
-    """Сохраняет существующий Excel и добавляет новые фото в отдельное приложение, не удаляя прежние данные."""
+    """Пересобирает фотоблоки в исходных секциях: сохраняет замеры, распределение фото и заключение."""
     wb = openpyxl.load_workbook(io.BytesIO(excel_bytes))
     ws = wb.active
 
-    # Обновляем основные поля в исходной шапке отчёта, если структура листа стандартная.
     updates = {
         "C4": report_data.get("report_no", ""),
         "G4": report_data.get("inspection_date", ""),
@@ -489,44 +491,134 @@ def append_photos_to_existing_excel(excel_bytes: bytes, new_photos: list[tuple[s
         except Exception:
             pass
 
-    start_row = ws.max_row + 3
+    section_order = [
+        ("PRODUCT WORKMANSHIP PHOTOS", "Продукция"),
+        ("PACKAGING & CARTON DETAILS", "Упаковка и маркировка"),
+        ("LABELS & BARCODES VERIFICATION", "Стикеры и штрихкоды"),
+        ("DEFECT DETAILS & LOG", "Дефекты"),
+    ]
+    title_to_key = {}
+    for key, russian_title in section_order:
+        title_to_key[key] = key
+        title_to_key[russian_title] = key
+    grouped = {key: [] for key, _ in section_order}
+
+    # Восстанавливаем все существующие фото из Excel, сохраняя их секцию.
+    for item in extract_images_from_excel(excel_bytes):
+        section_title = item.get("section", "")
+        key = title_to_key.get(section_title)
+        if key:
+            grouped[key].append({"bytes": item["bytes"], "caption": item.get("label", "")})
+        else:
+            # Если старый файл был создан прежней версией и секция не распознана,
+            # не теряем фотографии: помещаем их в секцию продукции.
+            grouped["products"].append({"bytes": item["bytes"], "caption": item.get("label", "")})
+
+    # Новые фотографии закрепляются за выбранным разделом.
+    for section_title, raw in new_photos:
+        key = title_to_key.get(section_title)
+        if key and raw:
+            grouped[key].append({"bytes": raw, "caption": ""})
+
+    # Находим начало фотоблока/заключения. Всё выше этой строки (включая замеры)
+    # сохраняем. Фотографии и заключение ниже полностью формируем заново.
+    start_candidates = []
+    for row in range(1, ws.max_row + 1):
+        val = str(ws.cell(row=row, column=2).value or "").strip()
+        if val in PHOTO_SECTION_TITLES or val in (
+            "INSPECTION COMMENTS & CONCLUSION",
+            "UPDATED COMMENTS AND CONCLUSION",
+            "ADDITIONAL PHOTOS — UPDATED REPORT",
+        ):
+            start_candidates.append(row)
+    start_row = min(start_candidates) if start_candidates else ws.max_row + 1
+
+    # Удаляем изображения (они будут вставлены заново в корректную сетку 3 в ряд).
+    ws._images = []
+    if start_row <= ws.max_row:
+        ws.delete_rows(start_row, ws.max_row - start_row + 1)
+
+    # Сетка из трёх фото в ряд; секции с пустым списком не выводятся.
+    c_header = "334155"
+    c_sub = "475569"
+    c_border = "CBD5E1"
+    thin_border = Border(
+        left=Side(style="thin", color=c_border),
+        right=Side(style="thin", color=c_border),
+        top=Side(style="thin", color=c_border),
+        bottom=Side(style="thin", color=c_border),
+    )
+    for col_letter in ["B", "C", "D", "E", "F", "G", "H", "I", "J"]:
+        if ws.column_dimensions[col_letter].width is None:
+            ws.column_dimensions[col_letter].width = 15
     row = start_row
-    if new_photos:
-        ws.merge_cells(start_row=start_row, start_column=2, end_row=start_row, end_column=9)
-        title_cell = ws.cell(start_row, 2, "ADDITIONAL PHOTOS — UPDATED REPORT")
-        title_cell.font = Font(name="Calibri", size=14, bold=True, color="FFFFFF")
-        title_cell.fill = PatternFill(start_color="334155", end_color="334155", fill_type="solid")
-        title_cell.alignment = Alignment(horizontal="center", vertical="center")
-        ws.row_dimensions[start_row].height = 28
-        row = start_row + 2
+    slots = [(2, 4, "B"), (5, 7, "E"), (8, 10, "H")]
 
-    for idx, (section_title, raw) in enumerate(new_photos, start=1):
-        try:
-            with Image.open(io.BytesIO(raw)) as source:
-                image = source.convert("RGB")
-                buffer = io.BytesIO()
-                image.save(buffer, format="JPEG", quality=90)
-                buffer.seek(0)
-            ws.cell(row, 2, f"{section_title} — {idx}")
-            ws.cell(row, 2).font = Font(bold=True, color="334155")
-            photo = OpenPyXLImage(buffer)
-            photo.width = 420
-            photo.height = max(120, int(photo.width * (image.height / max(1, image.width))))
-            ws.add_image(photo, f"B{row + 1}")
-            row += max(22, int(photo.height / 20) + 3)
-        except Exception:
+    for section_key, section_title in section_order:
+        photos = grouped[section_key]
+        if not photos:
             continue
+        ws.merge_cells(start_row=row, start_column=2, end_row=row, end_column=10)
+        header = ws.cell(row=row, column=2, value=section_key)
+        header.fill = PatternFill(start_color=c_header, end_color=c_header, fill_type="solid")
+        header.font = Font(name="Calibri", size=10, bold=True, color="FFFFFF")
+        header.alignment = Alignment(horizontal="left", vertical="center", indent=1)
+        ws.row_dimensions[row].height = 22
+        apply_range_style(ws, 2, row, 10, row, border=thin_border)
+        row += 1
 
-    # Добавляем актуальное заключение в конец, сохраняя исходный лист и существующие замеры.
+        for base in range(0, len(photos), 3):
+            image_row = row
+            caption_row = row + 1
+            ws.row_dimensions[image_row].height = 116
+            ws.row_dimensions[caption_row].height = 16
+            for slot_idx, (start_col, end_col, anchor_col) in enumerate(slots):
+                photo_idx = base + slot_idx
+                if photo_idx >= len(photos):
+                    continue
+                p = photos[photo_idx]
+                raw = p["bytes"]
+                try:
+                    with Image.open(io.BytesIO(raw)) as source:
+                        image = ImageOps.exif_transpose(source).convert("RGB")
+                        image = ImageOps.fit(image, (900, 506), method=Image.Resampling.LANCZOS)
+                        buffer = io.BytesIO()
+                        image.save(buffer, format="JPEG", quality=90)
+                        buffer.seek(0)
+                    ws.merge_cells(start_row=image_row, start_column=start_col, end_row=image_row, end_column=end_col)
+                    apply_range_style(ws, start_col, image_row, end_col, image_row, border=thin_border)
+                    xl_img = OpenPyXLImage(buffer)
+                    xl_img.width = 270
+                    xl_img.height = 152
+                    ws.add_image(xl_img, f"{anchor_col}{image_row}")
+                    ws.merge_cells(start_row=caption_row, start_column=start_col, end_row=caption_row, end_column=end_col)
+                    caption = p.get("caption") or f"{section_title} — {photo_idx + 1}"
+                    cap_cell = ws.cell(row=caption_row, column=start_col, value=caption)
+                    cap_cell.font = Font(name="Calibri", size=8, italic=True, color=c_sub)
+                    cap_cell.alignment = Alignment(horizontal="center", vertical="center")
+                    apply_range_style(ws, start_col, caption_row, end_col, caption_row, border=thin_border)
+                except Exception:
+                    continue
+            row += 2
+
+    # Заключение сразу после фотоблоков; без пометки о дополнительных фото.
     row += 1
-    ws.merge_cells(start_row=row, start_column=2, end_row=row, end_column=9)
-    ws.cell(row, 2, "UPDATED COMMENTS AND CONCLUSION")
-    ws.cell(row, 2).font = Font(bold=True, color="FFFFFF")
-    ws.cell(row, 2).fill = PatternFill(start_color="334155", end_color="334155", fill_type="solid")
+    ws.merge_cells(start_row=row, start_column=2, end_row=row, end_column=10)
+    header = ws.cell(row=row, column=2, value="INSPECTION COMMENTS & CONCLUSION")
+    header.font = Font(name="Calibri", size=10, bold=True, color="FFFFFF")
+    header.fill = PatternFill(start_color=c_header, end_color=c_header, fill_type="solid")
+    header.alignment = Alignment(horizontal="left", vertical="center", indent=1)
+    apply_range_style(ws, 2, row, 10, row, border=thin_border)
     row += 1
     comments = str(report_data.get("comments") or "")
-    for line in (comments.splitlines() or [""]):
-        ws.cell(row, 2, line)
+    lines = comments.splitlines() or [""]
+    for line in lines:
+        ws.merge_cells(start_row=row, start_column=2, end_row=row, end_column=10)
+        cell = ws.cell(row=row, column=2, value=line)
+        cell.alignment = Alignment(horizontal="left", vertical="top", wrap_text=True)
+        cell.font = Font(name="Calibri", size=9, color="0F172A")
+        apply_range_style(ws, 2, row, 10, row, border=thin_border)
+        ws.row_dimensions[row].height = 18
         row += 1
 
     output = io.BytesIO()
@@ -573,11 +665,27 @@ def extract_images_from_excel(excel_bytes: bytes) -> list[dict]:
 
             pending.sort(key=lambda item: item[0])
             counters: dict[str, int] = {}
+            title_aliases = {
+                "PRODUCT WORKMANSHIP PHOTOS": "Продукция",
+                "PACKAGING & CARTON DETAILS": "Упаковка и маркировка",
+                "LABELS & BARCODES VERIFICATION": "Стикеры и штрихкоды",
+                "DEFECT DETAILS & LOG": "Дефекты",
+            }
             for img_row, raw in pending:
                 section = ""
                 for header_row, header_title in section_rows:
                     if header_row <= img_row:
                         section = header_title
+                # Совместимость со старыми Excel, где фото добавлялись в конец
+                # с текстом секции в ячейке B перед фотографией.
+                for rr in range(max(1, img_row - 3), img_row + 1):
+                    cell_text = str(worksheet.cell(row=rr, column=2).value or "").strip()
+                    for english_title, russian_title in title_aliases.items():
+                        if cell_text.startswith(english_title):
+                            section = russian_title
+                            break
+                    if section in title_aliases.values():
+                        break
                 counters[section] = counters.get(section, 0) + 1
                 label = f"{section} — {counters[section]}" if section else f"Фото {counters[section]}"
                 images.append({"bytes": raw, "label": label, "section": section})
@@ -701,7 +809,7 @@ document.getElementById('close').addEventListener('click',()=>overlay.classList.
 document.getElementById('prev').addEventListener('click',()=>show(current-1));document.getElementById('next').addEventListener('click',()=>show(current+1));
 document.addEventListener('keydown',e=>{{if(!overlay.classList.contains('open'))return;if(e.key==='Escape')overlay.classList.remove('open');if(e.key==='ArrowLeft')show(current-1);if(e.key==='ArrowRight')show(current+1)}});
 </script></body></html>'''
-    components.html(html, height=max(height, 760), scrolling=False)
+    components.html(html, height=max(300, min(height, 560)), scrolling=False)
 
 
 def _make_report_number() -> str:
@@ -1000,19 +1108,26 @@ with tab_archive:
                         height=160,
                     )
 
-                    st.markdown("#### Добавить фотографии к отчёту")
-                    st.caption("Существующие фотографии и замеры сохраняются. Новые фотографии добавятся в конец Excel-файла.")
-                    edit_photo_section = st.selectbox(
-                        "Раздел для новых фотографий",
-                        ["Продукция", "Упаковка и маркировка", "Стикеры и штрихкоды", "Дефекты"],
-                        key=f"edit_photo_section_{selected_id}",
-                    )
-                    edited_photo_uploads = st.file_uploader(
-                        "Загрузить дополнительные фотографии",
-                        type=["jpg", "jpeg", "png", "webp"],
-                        accept_multiple_files=True,
-                        key=f"edit_photos_{selected_id}",
-                    )
+                    st.markdown("#### Добавить фотографии в нужные разделы")
+                    st.caption("Загружай фотографии отдельно в нужный блок. Существующие фото и замеры сохранятся; новые фото появятся в выбранных разделах и в Excel.")
+                    edit_photo_uploads_by_section = {
+                        "PRODUCT WORKMANSHIP PHOTOS": st.file_uploader(
+                            "Продукция", type=["jpg", "jpeg", "png", "webp"],
+                            accept_multiple_files=True, key=f"edit_photos_products_{selected_id}",
+                        ),
+                        "PACKAGING & CARTON DETAILS": st.file_uploader(
+                            "Упаковка и маркировка", type=["jpg", "jpeg", "png", "webp"],
+                            accept_multiple_files=True, key=f"edit_photos_packing_{selected_id}",
+                        ),
+                        "LABELS & BARCODES VERIFICATION": st.file_uploader(
+                            "Стикеры и штрихкоды", type=["jpg", "jpeg", "png", "webp"],
+                            accept_multiple_files=True, key=f"edit_photos_labels_{selected_id}",
+                        ),
+                        "DEFECT DETAILS & LOG": st.file_uploader(
+                            "Дефекты", type=["jpg", "jpeg", "png", "webp"],
+                            accept_multiple_files=True, key=f"edit_photos_defects_{selected_id}",
+                        ),
+                    }
 
                     save_col, cancel_col = st.columns(2)
                     save_changes = save_col.form_submit_button(
@@ -1056,16 +1171,13 @@ with tab_archive:
                             old_excel_bytes = download_excel_from_storage(selected_path_for_update) if selected_path_for_update else None
                             if not old_excel_bytes:
                                 raise RuntimeError("Не удалось загрузить исходный Excel из Supabase; фотографии не сохранены.")
-                            section_key_map = {
-                                "Продукция": "PRODUCT WORKMANSHIP PHOTOS",
-                                "Упаковка и маркировка": "PACKAGING & CARTON DETAILS",
-                                "Стикеры и штрихкоды": "LABELS & BARCODES VERIFICATION",
-                                "Дефекты": "DEFECT DETAILS & LOG",
-                            }
                             updated_for_excel = dict(updated_report_data)
                             updated_for_excel["inspection_date"] = normalized_date
                             updated_for_excel["inspector_id"] = st.session_state.auth_user.email
-                            added_photos = [(section_key_map[edit_photo_section], item.getvalue()) for item in (edited_photo_uploads or [])]
+                            added_photos = []
+                            for section_title, uploaded_files in edit_photo_uploads_by_section.items():
+                                for item in (uploaded_files or []):
+                                    added_photos.append((section_title, item.getvalue()))
                             refreshed_excel = append_photos_to_existing_excel(old_excel_bytes, added_photos, updated_for_excel)
                             upload_path = selected_path_for_update
                             upload_result = supabase.storage.from_(QC_REPORTS_BUCKET).upload(
@@ -1325,10 +1437,6 @@ with tab_new:
             )
             
             if files:
-                if len(files) > 12:
-                    st.warning(f"Выбрано {len(files)} фото. В отчет попадут первые 12.")
-                    files = files[:12]
-                
                 preview_cols = st.columns(4)
                 for idx, fl in enumerate(files):
                     with preview_cols[idx % 4]:

@@ -5,7 +5,7 @@ import os
 import io
 import urllib.request
 import uuid
-from datetime import datetime
+from datetime import datetime, date
 import base64
 import streamlit as st
 import streamlit.components.v1 as components
@@ -298,23 +298,43 @@ def create_full_qc_report(
 
             curr_row += 2
 
-    # 5. Общий итог проверки в Excel (Выводы и замечания)
-    ws.merge_cells(start_row=curr_row, start_column=2, end_row=curr_row, end_column=9)
-    ws.row_dimensions[curr_row].height = 22
-    conc_cell = ws.cell(row=curr_row, column=2, value="INSPECTION COMMENTS & CONCLUSION")
-    conc_cell.fill = PatternFill(start_color=c_header, fill_type="solid")
-    conc_cell.font = Font(name="Calibri", size=10, bold=True, color="FFFFFF")
-    conc_cell.alignment = Alignment(horizontal="left", vertical="center", indent=1)
-    apply_range_style(ws, 2, curr_row, 9, curr_row, border=thin_border)
-    curr_row += 1
+    # 5. Отдельные блоки комментариев инспектора и заключения
+    def add_text_block(title: str, text: str, row: int) -> int:
+        ws.merge_cells(start_row=row, start_column=2, end_row=row, end_column=9)
+        ws.row_dimensions[row].height = 22
+        header_cell = ws.cell(row=row, column=2, value=title)
+        header_cell.fill = PatternFill(start_color=c_header, end_color=c_header, fill_type="solid")
+        header_cell.font = Font(name="Calibri", size=10, bold=True, color="FFFFFF")
+        header_cell.alignment = Alignment(horizontal="left", vertical="center", indent=1)
+        apply_range_style(ws, 2, row, 9, row, border=thin_border)
+        row += 1
+        lines = str(text or "—").splitlines() or ["—"]
+        for line in lines:
+            ws.merge_cells(start_row=row, start_column=2, end_row=row, end_column=9)
+            cell = ws.cell(row=row, column=2, value=line)
+            cell.alignment = Alignment(horizontal="left", vertical="top", wrap_text=True)
+            cell.font = Font(name="Calibri", size=9, color="0F172A")
+            apply_range_style(ws, 2, row, 9, row, border=thin_border)
+            ws.row_dimensions[row].height = 20
+            row += 1
+        return row + 1
 
-    ws.merge_cells(start_row=curr_row, start_column=2, end_row=curr_row + 3, end_column=9)
-    for r in range(curr_row, curr_row + 4):
-        ws.row_dimensions[r].height = 18
-    text_cell = ws.cell(row=curr_row, column=2, value=report_data.get("comments", "Inspection carried out in accordance with standard specifications."))
-    text_cell.alignment = Alignment(horizontal="left", vertical="top", wrap_text=True)
-    text_cell.font = Font(name="Calibri", size=9, color="0F172A")
-    apply_range_style(ws, 2, curr_row, 9, curr_row + 3, border=thin_border)
+    curr_row = add_text_block("INSPECTOR COMMENTS", report_data.get("inspector_comments", report_data.get("comments", "")), curr_row)
+    curr_row = add_text_block("INSPECTION CONCLUSION", report_data.get("conclusion", ""), curr_row)
+
+    # Итог проверки дополнительно дублируется внизу отчёта.
+    ws.merge_cells(start_row=curr_row, start_column=2, end_row=curr_row, end_column=9)
+    ws.row_dimensions[curr_row].height = 28
+    result_cell = ws.cell(row=curr_row, column=2, value=f"FINAL INSPECTION RESULT: {res_status}")
+    result_cell.font = Font(name="Calibri", size=12, bold=True, color="FFFFFF")
+    result_cell.alignment = Alignment(horizontal="center", vertical="center")
+    if res_status == "PASSED":
+        result_cell.fill = PatternFill(start_color=c_pass_fg, end_color=c_pass_fg, fill_type="solid")
+    elif res_status == "REJECTED":
+        result_cell.fill = PatternFill(start_color=c_fail_fg, end_color=c_fail_fg, fill_type="solid")
+    else:
+        result_cell.fill = PatternFill(start_color=c_pend_fg, end_color=c_pend_fg, fill_type="solid")
+    apply_range_style(ws, 2, curr_row, 9, curr_row, border=thin_border)
 
     out = io.BytesIO()
     wb.save(out)
@@ -601,25 +621,38 @@ def append_photos_to_existing_excel(excel_bytes: bytes, new_photos: list[tuple[s
                     continue
             row += 2
 
-    # Заключение сразу после фотоблоков; без пометки о дополнительных фото.
+    # Обновляем отдельные текстовые блоки и дублируем результат внизу.
     row += 1
+    def add_footer_text(title: str, text: str, row_num: int) -> int:
+        ws.merge_cells(start_row=row_num, start_column=2, end_row=row_num, end_column=10)
+        header = ws.cell(row=row_num, column=2, value=title)
+        header.font = Font(name="Calibri", size=10, bold=True, color="FFFFFF")
+        header.fill = PatternFill(start_color=c_header, end_color=c_header, fill_type="solid")
+        header.alignment = Alignment(horizontal="left", vertical="center", indent=1)
+        ws.row_dimensions[row_num].height = 22
+        apply_range_style(ws, 2, row_num, 10, row_num, border=thin_border)
+        row_num += 1
+        for line in (str(text or "—").splitlines() or ["—"]):
+            ws.merge_cells(start_row=row_num, start_column=2, end_row=row_num, end_column=10)
+            cell = ws.cell(row=row_num, column=2, value=line)
+            cell.alignment = Alignment(horizontal="left", vertical="top", wrap_text=True)
+            cell.font = Font(name="Calibri", size=9, color="0F172A")
+            apply_range_style(ws, 2, row_num, 10, row_num, border=thin_border)
+            ws.row_dimensions[row_num].height = 20
+            row_num += 1
+        return row_num + 1
+
+    row = add_footer_text("INSPECTOR COMMENTS", report_data.get("inspector_comments", report_data.get("comments", "")), row)
+    row = add_footer_text("INSPECTION CONCLUSION", report_data.get("conclusion", ""), row)
+    result = str(report_data.get("result_status") or "PENDING").upper()
     ws.merge_cells(start_row=row, start_column=2, end_row=row, end_column=10)
-    header = ws.cell(row=row, column=2, value="INSPECTION COMMENTS & CONCLUSION")
-    header.font = Font(name="Calibri", size=10, bold=True, color="FFFFFF")
-    header.fill = PatternFill(start_color=c_header, end_color=c_header, fill_type="solid")
-    header.alignment = Alignment(horizontal="left", vertical="center", indent=1)
+    result_cell = ws.cell(row=row, column=2, value=f"FINAL INSPECTION RESULT: {result}")
+    result_cell.font = Font(name="Calibri", size=12, bold=True, color="FFFFFF")
+    result_cell.alignment = Alignment(horizontal="center", vertical="center")
+    result_color = "166534" if result == "PASSED" else "991B1B" if result == "REJECTED" else "92400E"
+    result_cell.fill = PatternFill(start_color=result_color, end_color=result_color, fill_type="solid")
+    ws.row_dimensions[row].height = 28
     apply_range_style(ws, 2, row, 10, row, border=thin_border)
-    row += 1
-    comments = str(report_data.get("comments") or "")
-    lines = comments.splitlines() or [""]
-    for line in lines:
-        ws.merge_cells(start_row=row, start_column=2, end_row=row, end_column=10)
-        cell = ws.cell(row=row, column=2, value=line)
-        cell.alignment = Alignment(horizontal="left", vertical="top", wrap_text=True)
-        cell.font = Font(name="Calibri", size=9, color="0F172A")
-        apply_range_style(ws, 2, row, 10, row, border=thin_border)
-        ws.row_dimensions[row].height = 18
-        row += 1
 
     output = io.BytesIO()
     wb.save(output)
@@ -1103,9 +1136,14 @@ with tab_archive:
                         )
 
                     edited_comments = st.text_area(
-                        "Комментарии и заключение",
-                        value=str(report_data.get("comments") or ""),
-                        height=160,
+                        "Комментарии инспектора",
+                        value=str(report_data.get("inspector_comments") or report_data.get("comments") or ""),
+                        height=120,
+                    )
+                    edited_conclusion = st.text_area(
+                        "Заключение инспекции",
+                        value=str(report_data.get("conclusion") or ""),
+                        height=120,
                     )
 
                     st.markdown("#### Добавить фотографии в нужные разделы")
@@ -1162,7 +1200,9 @@ with tab_archive:
                             "sku": edited_sku.strip(),
                             "inspection_date": normalized_date,
                             "result_status": edited_status,
-                            "comments": edited_comments,
+                            "inspector_comments": edited_comments,
+                            "comments": edited_comments,  # совместимость со старыми отчётами
+                            "conclusion": edited_conclusion,
                         })
 
                         # Если добавлены фото, обновляем существующий Excel, не теряя исходные замеры и изображения.
@@ -1236,12 +1276,12 @@ with tab_archive:
                 st.write("**Артикул:**", selected_report.get("sku") or report_data.get("sku") or "-")
                 st.write("**Итог проверки:**", selected_report.get("result_status") or report_data.get("result_status") or "-")
 
-            st.markdown("### Комментарии и заключение")
-            comments = report_data.get("comments") or ""
-            if comments:
-                st.write(comments)
-            else:
-                st.caption("Комментарии в сохраненных данных отсутствуют.")
+            st.markdown("### Комментарии инспектора")
+            comments = report_data.get("inspector_comments") or report_data.get("comments") or ""
+            st.write(comments if comments else "—")
+            st.markdown("### Заключение инспекции")
+            conclusion = report_data.get("conclusion") or ""
+            st.write(conclusion if conclusion else "—")
 
             # Загружаем Excel из Storage и показываем фотографии, встроенные в отчет.
             selected_path = _storage_object_path(selected_report.get("excel_url"))
@@ -1321,6 +1361,7 @@ with tab_new:
         order_no = col_b4.text_input("PO / Order No.", value=extracted_data.get("order_no", ""))
         item_name = col_b5.text_input("Наименование товара", value=extracted_data.get("item_name", ""))
         sku = col_b6.text_input("SKU / Артикул", value=extracted_data.get("sku", ""))
+        inspection_date = st.date_input("Inspection Date / Дата инспекции", value=date.today(), key="draft_inspection_date")
 
     # 2. Размерная сетка (до 2 фото эталона)
     with st.container(border=True):
@@ -1448,35 +1489,48 @@ with tab_new:
                     })
             st.divider()
 
-    # 4. Комментарии инспектора
+    # 4. Комментарии инспектора и заключение — отдельные поля
     with st.container(border=True):
-        st.markdown("**4. Комментарии**")
+        st.markdown("**4. Комментарии инспектора**")
         raw_comments = st.text_area(
-            "Комментарии", 
-            value=st.session_state.comments_val,
+            "Комментарии инспектора",
+            key="comments_val",
             placeholder="Рабочие заметки инспектора...",
             label_visibility="collapsed"
         )
-        if st.button("✨ Рецензировать с ИИ", key="btn_ai_comments"):
+        if st.button("✨ Отредактировать комментарии с ИИ", key="btn_ai_comments"):
             if raw_comments.strip():
-                with st.spinner("Рецензирование..."):
-                    st.session_state.comments_val = ai_service.polish_qc_text(raw_comments, field_type="comments")
+                with st.spinner("Редактирование текста с сохранением исходного языка..."):
+                    # Явно просим модель сохранить язык исходного текста и не переводить его.
+                    language_guarded_text = (
+                        "[INSTRUCTION: Correct and polish the text below. Preserve its original language exactly: "
+                        "if the text is Russian, output Russian; if English, output English. Do not translate. "
+                        "Return only the polished text.]\n\n" + raw_comments
+                    )
+                    st.session_state.comments_val = ai_service.polish_qc_text(
+                        language_guarded_text, field_type="comments"
+                    )
                     st.rerun()
 
-    # 5. Общий итог проверки
     with st.container(border=True):
-        st.markdown("**5. Общий итог проверки**")
-        default_conclusion = st.session_state.conclusion_val if st.session_state.conclusion_val else st.session_state.comments_val
+        st.markdown("**5. Заключение инспекции**")
         final_comments = st.text_area(
-            "Итоговые выводы для отчета", 
-            value=default_conclusion,
-            placeholder="Итоговое заключение для отчета...",
+            "Заключение инспекции",
+            key="conclusion_val",
+            placeholder="Итоговое заключение по результатам проверки...",
             label_visibility="collapsed"
         )
-        if st.button("✨ Рецензировать с ИИ", key="btn_ai_conclusion"):
+        if st.button("✨ Отредактировать заключение с ИИ", key="btn_ai_conclusion"):
             if final_comments.strip():
-                with st.spinner("Рецензирование..."):
-                    st.session_state.conclusion_val = ai_service.polish_qc_text(final_comments, field_type="conclusion")
+                with st.spinner("Редактирование текста с сохранением исходного языка..."):
+                    language_guarded_text = (
+                        "[INSTRUCTION: Correct and polish the text below. Preserve its original language exactly: "
+                        "if the text is Russian, output Russian; if English, output English. Do not translate. "
+                        "Return only the polished text.]\n\n" + final_comments
+                    )
+                    st.session_state.conclusion_val = ai_service.polish_qc_text(
+                        language_guarded_text, field_type="conclusion"
+                    )
                     st.rerun()
 
         result_status = st.selectbox("Финальный результат инспекции", ["PASSED", "PENDING", "REJECTED"])
@@ -1492,8 +1546,11 @@ with tab_new:
             "item_name": item_name,
             "sku": sku,
             "inspector_id": st.session_state.auth_user.email,
+            "inspection_date": inspection_date.isoformat(),
             "result_status": result_status,
-            "comments": final_comments
+            "inspector_comments": raw_comments,
+            "comments": raw_comments,  # backward compatibility with older report records
+            "conclusion": final_comments
         }
         
         try:
@@ -1516,6 +1573,7 @@ with tab_new:
                         "order_no": order_no,
                         "item_name": item_name,
                         "sku": sku,
+                        "inspection_date": inspection_date.isoformat(),
                         "result_status": result_status,
                         "report_data": rep_payload,
                     },

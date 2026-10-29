@@ -1489,49 +1489,56 @@ with tab_new:
                     })
             st.divider()
 
-    # 4. Комментарии инспектора и заключение — отдельные поля
+    # 4. Комментарии инспектора — кнопка обработки расположена ДО text_area,
+    # чтобы не менять ключ session_state после создания виджета.
     with st.container(border=True):
         st.markdown("**4. Комментарии инспектора**")
+        if st.button("✨ Отредактировать комментарии с ИИ", key="btn_ai_comments"):
+            current_comments = st.session_state.get("comments_val", "")
+            if current_comments.strip():
+                with st.spinner("Редактирование текста с сохранением исходного языка..."):
+                    language_guarded_text = (
+                        "[INSTRUCTION: Correct and polish the text below. Preserve its original language exactly: "
+                        "if the text is Russian, output Russian; if English, output English. Do not translate. "
+                        "Return only the polished text.]\n\n" + current_comments
+                    )
+                    st.session_state.comments_val = ai_service.polish_qc_text(
+                        language_guarded_text, field_type="comments"
+                    )
+                    st.rerun()
+            else:
+                st.info("Сначала введите комментарий.")
         raw_comments = st.text_area(
             "Комментарии инспектора",
             key="comments_val",
             placeholder="Рабочие заметки инспектора...",
             label_visibility="collapsed"
         )
-        if st.button("✨ Отредактировать комментарии с ИИ", key="btn_ai_comments"):
-            if raw_comments.strip():
+
+    # 5. Заключение инспекции — тот же безопасный порядок.
+    with st.container(border=True):
+        st.markdown("**5. Заключение инспекции**")
+        if st.button("✨ Отредактировать заключение с ИИ", key="btn_ai_conclusion"):
+            current_conclusion = st.session_state.get("conclusion_val", "")
+            if current_conclusion.strip():
                 with st.spinner("Редактирование текста с сохранением исходного языка..."):
-                    # Явно просим модель сохранить язык исходного текста и не переводить его.
                     language_guarded_text = (
                         "[INSTRUCTION: Correct and polish the text below. Preserve its original language exactly: "
                         "if the text is Russian, output Russian; if English, output English. Do not translate. "
-                        "Return only the polished text.]\n\n" + raw_comments
+                        "Return only the polished text.]\n\n" + current_conclusion
                     )
-                    st.session_state.comments_val = ai_service.polish_qc_text(
-                        language_guarded_text, field_type="comments"
+                    st.session_state.conclusion_val = ai_service.polish_qc_text(
+                        language_guarded_text, field_type="conclusion"
                     )
                     st.rerun()
-
-    with st.container(border=True):
-        st.markdown("**5. Заключение инспекции**")
+            else:
+                st.info("Сначала введите заключение.")
         final_comments = st.text_area(
             "Заключение инспекции",
             key="conclusion_val",
             placeholder="Итоговое заключение по результатам проверки...",
             label_visibility="collapsed"
         )
-        if st.button("✨ Отредактировать заключение с ИИ", key="btn_ai_conclusion"):
-            if final_comments.strip():
-                with st.spinner("Редактирование текста с сохранением исходного языка..."):
-                    language_guarded_text = (
-                        "[INSTRUCTION: Correct and polish the text below. Preserve its original language exactly: "
-                        "if the text is Russian, output Russian; if English, output English. Do not translate. "
-                        "Return only the polished text.]\n\n" + final_comments
-                    )
-                    st.session_state.conclusion_val = ai_service.polish_qc_text(
-                        language_guarded_text, field_type="conclusion"
-                    )
-                    st.rerun()
 
         result_status = st.selectbox("Финальный результат инспекции", ["PASSED", "PENDING", "REJECTED"])
 

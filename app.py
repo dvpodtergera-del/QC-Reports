@@ -4,6 +4,9 @@ import sys
 import os
 import io
 import urllib.request
+import uuid
+from datetime import datetime
+import base64
 import streamlit as st
 from supabase import create_client, Client
 from PIL import Image, ImageOps
@@ -498,6 +501,11 @@ def show_photo_viewer():
 
     if st.button("✕ Закрыть просмотр", key="photo_viewer_close", use_container_width=True):
         st.session_state.photo_viewer_open = False
+        try:
+            if "photo_view" in st.query_params:
+                del st.query_params["photo_view"]
+        except Exception:
+            pass
         st.rerun()
 
     prev_col, counter_col, next_col = st.columns([1, 2, 1])
@@ -516,8 +524,38 @@ def show_photo_viewer():
             st.rerun()
 
 
+def _make_report_number() -> str:
+    """Читаемый уникальный номер отчёта: QC-YYYYMMDD-HHMMSS-XXXX."""
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    suffix = uuid.uuid4().hex[:4].upper()
+    return f"QC-{stamp}-{suffix}"
+
+
+def _start_new_report() -> None:
+    """Создаёт чистый черновик, не затрагивая уже сохранённые отчёты."""
+    auth_user = st.session_state.get("auth_user")
+    # Очищаем состояние текущего черновика и ключи виджетов, сохраняя авторизацию.
+    for key in list(st.session_state.keys()):
+        if key != "auth_user":
+            try:
+                del st.session_state[key]
+            except Exception:
+                pass
+    st.session_state.auth_user = auth_user
+    st.session_state.reference_spec = None
+    st.session_state.measured_samples = []
+    st.session_state.comments_val = ""
+    st.session_state.conclusion_val = ""
+    st.session_state.last_excel_bytes = None
+    st.session_state.last_excel_name = "qc_report.xlsx"
+    st.session_state.draft_report_no = _make_report_number()
+    st.session_state.selected_report_id = None
+
+
 if "auth_user" not in st.session_state:
     st.session_state.auth_user = None
+if "draft_report_no" not in st.session_state:
+    st.session_state.draft_report_no = _make_report_number()
 if "reference_spec" not in st.session_state:
     st.session_state.reference_spec = None
 if "measured_samples" not in st.session_state:
@@ -583,7 +621,17 @@ with tab_archive:
         if "selected_report_id" not in st.session_state:
             st.session_state.selected_report_id = None
 
-        if report_list:
+        selected_id = st.session_state.get("selected_report_id")
+        selected_report = next(
+            (r for r in report_list if str(r.get("id") or "") == str(selected_id)),
+            None,
+        )
+
+        # Когда открыт отчёт, скрываем список архива: пользователь видит только сам отчёт.
+        if report_list and selected_report is None:
+            archive_action_col, _ = st.columns([2, 5])
+            with archive_action_col:
+                st.caption("Выберите отчёт, чтобы открыть его отдельно от списка.")
             for rep in report_list:
                 rid = str(rep.get("id") or "")
                 storage_path = _storage_object_path(rep.get("excel_url"))
@@ -641,253 +689,266 @@ with tab_archive:
                     else:
                         c5.caption("Excel не сохранен")
 
-            # Просмотр выбранного отчета
-            selected_id = st.session_state.get("selected_report_id")
-            selected_report = next(
-                (r for r in report_list if str(r.get("id") or "") == str(selected_id)),
-                None,
-            )
+        # Просмотр выбранного отчёта вместо списка архива — не нужно прокручивать вниз.
+        if selected_report:
+            st.subheader(f"Отчёт: {selected_report.get('report_no') or '-'}")
 
-            if selected_report:
-                st.divider()
-                st.subheader(f"Просмотр отчета: {selected_report.get('report_no') or '-'}")
+            if st.button("← Назад в архив", key="close_report_view"):
+                st.session_state.selected_report_id = None
+                st.session_state.photo_viewer_open = False
+                try:
+                    if "photo_view" in st.query_params:
+                        del st.query_params["photo_view"]
+                except Exception:
+                    pass
+                st.rerun()
 
-                if st.button("Закрыть отчет", key="close_report_view"):
-                    st.session_state.selected_report_id = None
-                    st.rerun()
-
-                report_data = selected_report.get("report_data") or {}
-                if isinstance(report_data, str):
-                    import json
-                    try:
-                        report_data = json.loads(report_data)
-                    except Exception:
-                        report_data = {}
-
-                if not isinstance(report_data, dict):
+            report_data = selected_report.get("report_data") or {}
+            if isinstance(report_data, str):
+                import json
+                try:
+                    report_data = json.loads(report_data)
+                except Exception:
                     report_data = {}
 
-                # Режим редактирования конкретного отчета
-                edit_state_key = f"editing_report_{selected_id}"
-                if edit_state_key not in st.session_state:
-                    st.session_state[edit_state_key] = False
+            if not isinstance(report_data, dict):
+                report_data = {}
 
-                edit_col, _ = st.columns([2, 5])
-                if not st.session_state[edit_state_key]:
-                    if edit_col.button(
-                        "✏️ Редактировать отчет",
-                        key=f"start_edit_{selected_id}",
-                        use_container_width=True,
-                    ):
-                        st.session_state[edit_state_key] = True
-                        st.rerun()
+            # Режим редактирования конкретного отчета
+            edit_state_key = f"editing_report_{selected_id}"
+            if edit_state_key not in st.session_state:
+                st.session_state[edit_state_key] = False
 
-                if st.session_state[edit_state_key]:
-                    st.markdown("### Редактирование отчета")
-                    st.caption(
-                        "Изменения сохраняются в базе данных. Уже созданный Excel-файл "
-                        "останется прежним, пока не будет сформирован заново."
+            edit_col, _ = st.columns([2, 5])
+            if not st.session_state[edit_state_key]:
+                if edit_col.button(
+                    "✏️ Редактировать отчет",
+                    key=f"start_edit_{selected_id}",
+                    use_container_width=True,
+                ):
+                    st.session_state[edit_state_key] = True
+                    st.rerun()
+
+            if st.session_state[edit_state_key]:
+                st.markdown("### Редактирование отчета")
+                st.caption(
+                    "Изменения сохраняются в базе данных. Уже созданный Excel-файл "
+                    "останется прежним, пока не будет сформирован заново."
+                )
+
+                with st.form(key=f"edit_report_form_{selected_id}"):
+                    edit_c1, edit_c2 = st.columns(2)
+                    with edit_c1:
+                        edited_report_no = st.text_input(
+                            "Номер отчета",
+                            value=str(selected_report.get("report_no") or ""),
+                        )
+                        edited_client = st.text_input(
+                            "Клиент / Заказчик",
+                            value=str(selected_report.get("client_name") or report_data.get("client_name") or ""),
+                        )
+                        edited_supplier = st.text_input(
+                            "Фабрика / Поставщик",
+                            value=str(selected_report.get("supplier_name") or report_data.get("supplier_name") or ""),
+                        )
+                        edited_order = st.text_input(
+                            "Номер заказа",
+                            value=str(selected_report.get("order_no") or report_data.get("order_no") or ""),
+                        )
+                        edited_item = st.text_input(
+                            "Наименование товара",
+                            value=str(selected_report.get("item_name") or report_data.get("item_name") or ""),
+                        )
+                    with edit_c2:
+                        edited_sku = st.text_input(
+                            "Артикул / SKU",
+                            value=str(selected_report.get("sku") or report_data.get("sku") or ""),
+                        )
+                        edited_date = st.text_input(
+                            "Дата инспекции (ГГГГ-ММ-ДД)",
+                            value=str(selected_report.get("inspection_date") or report_data.get("inspection_date") or ""),
+                        )
+                        status_options = ["PASSED", "PENDING", "REJECTED"]
+                        current_status = str(selected_report.get("result_status") or report_data.get("result_status") or "PENDING").upper()
+                        if current_status not in status_options:
+                            current_status = "PENDING"
+                        edited_status = st.selectbox(
+                            "Итог проверки",
+                            status_options,
+                            index=status_options.index(current_status),
+                        )
+
+                    edited_comments = st.text_area(
+                        "Комментарии и заключение",
+                        value=str(report_data.get("comments") or ""),
+                        height=160,
                     )
 
-                    with st.form(key=f"edit_report_form_{selected_id}"):
-                        edit_c1, edit_c2 = st.columns(2)
-                        with edit_c1:
-                            edited_report_no = st.text_input(
-                                "Номер отчета",
-                                value=str(selected_report.get("report_no") or ""),
-                            )
-                            edited_client = st.text_input(
-                                "Клиент / Заказчик",
-                                value=str(selected_report.get("client_name") or report_data.get("client_name") or ""),
-                            )
-                            edited_supplier = st.text_input(
-                                "Фабрика / Поставщик",
-                                value=str(selected_report.get("supplier_name") or report_data.get("supplier_name") or ""),
-                            )
-                            edited_order = st.text_input(
-                                "Номер заказа",
-                                value=str(selected_report.get("order_no") or report_data.get("order_no") or ""),
-                            )
-                            edited_item = st.text_input(
-                                "Наименование товара",
-                                value=str(selected_report.get("item_name") or report_data.get("item_name") or ""),
-                            )
-                        with edit_c2:
-                            edited_sku = st.text_input(
-                                "Артикул / SKU",
-                                value=str(selected_report.get("sku") or report_data.get("sku") or ""),
-                            )
-                            edited_date = st.text_input(
-                                "Дата инспекции (ГГГГ-ММ-ДД)",
-                                value=str(selected_report.get("inspection_date") or report_data.get("inspection_date") or ""),
-                            )
-                            status_options = ["PASSED", "PENDING", "REJECTED"]
-                            current_status = str(selected_report.get("result_status") or report_data.get("result_status") or "PENDING").upper()
-                            if current_status not in status_options:
-                                current_status = "PENDING"
-                            edited_status = st.selectbox(
-                                "Итог проверки",
-                                status_options,
-                                index=status_options.index(current_status),
-                            )
+                    save_col, cancel_col = st.columns(2)
+                    save_changes = save_col.form_submit_button(
+                        "💾 Сохранить изменения",
+                        type="primary",
+                        use_container_width=True,
+                    )
+                    cancel_changes = cancel_col.form_submit_button(
+                        "Отмена",
+                        use_container_width=True,
+                    )
 
-                        edited_comments = st.text_area(
-                            "Комментарии и заключение",
-                            value=str(report_data.get("comments") or ""),
-                            height=160,
+                if cancel_changes:
+                    st.session_state[edit_state_key] = False
+                    st.rerun()
+
+                if save_changes:
+                    from datetime import date as _date
+                    try:
+                        # Проверяем формат даты, если дата указана.
+                        normalized_date = edited_date.strip()
+                        if normalized_date:
+                            _date.fromisoformat(normalized_date)
+
+                        updated_report_data = dict(report_data)
+                        updated_report_data.update({
+                            "report_no": edited_report_no.strip(),
+                            "client_name": edited_client.strip(),
+                            "supplier_name": edited_supplier.strip(),
+                            "order_no": edited_order.strip(),
+                            "item_name": edited_item.strip(),
+                            "sku": edited_sku.strip(),
+                            "inspection_date": normalized_date,
+                            "result_status": edited_status,
+                            "comments": edited_comments,
+                        })
+
+                        update_fields = {
+                            "report_no": edited_report_no.strip(),
+                            "client_name": edited_client.strip(),
+                            "supplier_name": edited_supplier.strip(),
+                            "order_no": edited_order.strip(),
+                            "item_name": edited_item.strip(),
+                            "sku": edited_sku.strip(),
+                            "inspection_date": normalized_date or None,
+                            "result_status": edited_status,
+                            "report_data": updated_report_data,
+                        }
+
+                        (
+                            supabase.table("reports")
+                            .update(update_fields)
+                            .eq("id", selected_id)
+                            .eq("inspector_id", st.session_state.auth_user.id)
+                            .execute()
                         )
 
-                        save_col, cancel_col = st.columns(2)
-                        save_changes = save_col.form_submit_button(
-                            "💾 Сохранить изменения",
-                            type="primary",
-                            use_container_width=True,
-                        )
-                        cancel_changes = cancel_col.form_submit_button(
-                            "Отмена",
-                            use_container_width=True,
-                        )
-
-                    if cancel_changes:
                         st.session_state[edit_state_key] = False
+                        st.success("Изменения сохранены.")
                         st.rerun()
 
-                    if save_changes:
-                        from datetime import date as _date
-                        try:
-                            # Проверяем формат даты, если дата указана.
-                            normalized_date = edited_date.strip()
-                            if normalized_date:
-                                _date.fromisoformat(normalized_date)
+                    except ValueError:
+                        st.error("Неверный формат даты. Используй ГГГГ-ММ-ДД, например 2026-10-29.")
+                    except Exception as e:
+                        st.error("Не удалось сохранить изменения. Проверь права UPDATE в Supabase.")
+                        st.caption(str(e))
 
-                            updated_report_data = dict(report_data)
-                            updated_report_data.update({
-                                "report_no": edited_report_no.strip(),
-                                "client_name": edited_client.strip(),
-                                "supplier_name": edited_supplier.strip(),
-                                "order_no": edited_order.strip(),
-                                "item_name": edited_item.strip(),
-                                "sku": edited_sku.strip(),
-                                "inspection_date": normalized_date,
-                                "result_status": edited_status,
-                                "comments": edited_comments,
-                            })
+            # Показываем актуальные поля записи из таблицы, а также сохраненные детали.
+            st.markdown("### Основная информация")
+            left, right = st.columns(2)
 
-                            update_fields = {
-                                "report_no": edited_report_no.strip(),
-                                "client_name": edited_client.strip(),
-                                "supplier_name": edited_supplier.strip(),
-                                "order_no": edited_order.strip(),
-                                "item_name": edited_item.strip(),
-                                "sku": edited_sku.strip(),
-                                "inspection_date": normalized_date or None,
-                                "result_status": edited_status,
-                                "report_data": updated_report_data,
-                            }
+            with left:
+                st.write("**Номер отчета:**", selected_report.get("report_no") or "-")
+                st.write("**Клиент:**", selected_report.get("client_name") or report_data.get("client_name") or "-")
+                st.write("**Фабрика / поставщик:**", selected_report.get("supplier_name") or report_data.get("supplier_name") or "-")
+                st.write("**Номер заказа:**", selected_report.get("order_no") or report_data.get("order_no") or "-")
 
-                            (
-                                supabase.table("reports")
-                                .update(update_fields)
-                                .eq("id", selected_id)
-                                .eq("inspector_id", st.session_state.auth_user.id)
-                                .execute()
-                            )
+            with right:
+                st.write("**Дата инспекции:**", selected_report.get("inspection_date") or report_data.get("inspection_date") or "-")
+                st.write("**Товар:**", selected_report.get("item_name") or report_data.get("item_name") or "-")
+                st.write("**Артикул:**", selected_report.get("sku") or report_data.get("sku") or "-")
+                st.write("**Итог проверки:**", selected_report.get("result_status") or report_data.get("result_status") or "-")
 
-                            st.session_state[edit_state_key] = False
-                            st.success("Изменения сохранены.")
-                            st.rerun()
+            st.markdown("### Комментарии и заключение")
+            comments = report_data.get("comments") or ""
+            if comments:
+                st.write(comments)
+            else:
+                st.caption("Комментарии в сохраненных данных отсутствуют.")
 
-                        except ValueError:
-                            st.error("Неверный формат даты. Используй ГГГГ-ММ-ДД, например 2026-10-29.")
-                        except Exception as e:
-                            st.error("Не удалось сохранить изменения. Проверь права UPDATE в Supabase.")
-                            st.caption(str(e))
+            st.markdown("### Дополнительные данные")
+            if report_data:
+                with st.expander("Показать все сохраненные данные отчета"):
+                    st.json(report_data)
+            else:
+                st.info("Для этой записи дополнительные данные отчета не сохранены.")
 
-                # Показываем актуальные поля записи из таблицы, а также сохраненные детали.
-                st.markdown("### Основная информация")
-                left, right = st.columns(2)
+            # Загружаем Excel из Storage и показываем фотографии, встроенные в отчет.
+            selected_path = _storage_object_path(selected_report.get("excel_url"))
+            if selected_path:
+                selected_cache_key = f"selected_excel_{selected_id}"
+                selected_bytes = st.session_state.get(selected_cache_key)
 
-                with left:
-                    st.write("**Номер отчета:**", selected_report.get("report_no") or "-")
-                    st.write("**Клиент:**", selected_report.get("client_name") or report_data.get("client_name") or "-")
-                    st.write("**Фабрика / поставщик:**", selected_report.get("supplier_name") or report_data.get("supplier_name") or "-")
-                    st.write("**Номер заказа:**", selected_report.get("order_no") or report_data.get("order_no") or "-")
-
-                with right:
-                    st.write("**Дата инспекции:**", selected_report.get("inspection_date") or report_data.get("inspection_date") or "-")
-                    st.write("**Товар:**", selected_report.get("item_name") or report_data.get("item_name") or "-")
-                    st.write("**Артикул:**", selected_report.get("sku") or report_data.get("sku") or "-")
-                    st.write("**Итог проверки:**", selected_report.get("result_status") or report_data.get("result_status") or "-")
-
-                st.markdown("### Комментарии и заключение")
-                comments = report_data.get("comments") or ""
-                if comments:
-                    st.write(comments)
-                else:
-                    st.caption("Комментарии в сохраненных данных отсутствуют.")
-
-                st.markdown("### Дополнительные данные")
-                if report_data:
-                    with st.expander("Показать все сохраненные данные отчета"):
-                        st.json(report_data)
-                else:
-                    st.info("Для этой записи дополнительные данные отчета не сохранены.")
-
-                # Загружаем Excel из Storage и показываем фотографии, встроенные в отчет.
-                selected_path = _storage_object_path(selected_report.get("excel_url"))
-                if selected_path:
-                    selected_cache_key = f"selected_excel_{selected_id}"
-                    selected_bytes = st.session_state.get(selected_cache_key)
-
-                    if selected_bytes is None:
-                        with st.spinner("Загрузка фотографий отчета..."):
-                            selected_bytes = download_excel_from_storage(selected_path)
-                        if selected_bytes:
-                            st.session_state[selected_cache_key] = selected_bytes
-
+                if selected_bytes is None:
+                    with st.spinner("Загрузка фотографий отчета..."):
+                        selected_bytes = download_excel_from_storage(selected_path)
                     if selected_bytes:
-                        photos_cache_key = f"selected_photos_{selected_id}"
-                        if photos_cache_key not in st.session_state:
-                            st.session_state[photos_cache_key] = extract_images_from_excel(selected_bytes)
+                        st.session_state[selected_cache_key] = selected_bytes
 
-                        report_photos = st.session_state.get(photos_cache_key, [])
-                        st.markdown("### Фотографии отчета")
-                        if report_photos:
-                            st.caption("Нажмите на миниатюру, чтобы открыть крупное фото. Переключайтесь стрелками в окне просмотра.")
-                            thumb_cols = st.columns(4)
-                            for photo_index, photo_bytes in enumerate(report_photos):
-                                with thumb_cols[photo_index % 4]:
-                                    st.image(photo_bytes, use_container_width=True)
-                                    if st.button(
-                                        f"🔍 Увеличить · {photo_index + 1}",
-                                        key=f"open_report_photo_{selected_id}_{photo_index}",
-                                        use_container_width=True,
-                                    ):
+                if selected_bytes:
+                    photos_cache_key = f"selected_photos_{selected_id}"
+                    if photos_cache_key not in st.session_state:
+                        st.session_state[photos_cache_key] = extract_images_from_excel(selected_bytes)
+
+                    report_photos = st.session_state.get(photos_cache_key, [])
+                    st.markdown("### Фотографии отчета")
+                    if report_photos:
+                        st.caption("Нажмите прямо на фотографию, чтобы увеличить её. Переключение — стрелками в окне просмотра.")
+                        thumb_cols = st.columns(4)
+                        requested_photo = st.query_params.get("photo_view")
+                        for photo_index, photo_bytes in enumerate(report_photos):
+                            with thumb_cols[photo_index % 4]:
+                                encoded = base64.b64encode(photo_bytes).decode("ascii")
+                                mime = "image/png" if photo_bytes[:8] == b"\x89PNG\r\n\x1a\n" else "image/jpeg"
+                                target = f"{selected_id}:{photo_index}"
+                                st.markdown(
+                                    f"""<a href="?photo_view={target}" target="_self" style="display:block;cursor:zoom-in;">
+                                    <img src="data:{mime};base64,{encoded}" alt="Фото {photo_index + 1}"
+                                    style="width:100%;height:150px;object-fit:cover;border-radius:8px;border:1px solid #d1d5db;" />
+                                    </a><div style="text-align:center;font-size:12px;color:#64748b;margin-top:4px">Фото {photo_index + 1}</div>""",
+                                    unsafe_allow_html=True,
+                                )
+
+                        if requested_photo:
+                            try:
+                                requested_report_id, requested_index = str(requested_photo).split(":", 1)
+                                if requested_report_id == str(selected_id):
+                                    requested_index = int(requested_index)
+                                    if 0 <= requested_index < len(report_photos):
                                         st.session_state.photo_viewer_images = report_photos
-                                        st.session_state.photo_viewer_index = photo_index
+                                        st.session_state.photo_viewer_index = requested_index
                                         st.session_state.photo_viewer_open = True
+                            except (ValueError, TypeError):
+                                pass
 
-                            if st.session_state.get("photo_viewer_open") and st.session_state.get("photo_viewer_images"):
-                                show_photo_viewer()
-                        else:
-                            st.caption("В Excel этого отчета встроенные фотографии не найдены.")
-
-                        st.download_button(
-                            "📥 Скачать Excel этого отчета",
-                            data=selected_bytes,
-                            file_name=_safe_download_name(
-                                str(selected_report.get("report_no") or "report"),
-                                str(selected_report.get("result_status") or ""),
-                            ),
-                            mime=EXCEL_MIME,
-                            key=f"download_selected_excel_{selected_id}",
-                        )
+                        if st.session_state.get("photo_viewer_open") and st.session_state.get("photo_viewer_images"):
+                            show_photo_viewer()
                     else:
-                        st.warning("Не удалось загрузить Excel из облака, поэтому фотографии пока недоступны.")
-                else:
-                    st.info("Для этого отчета Excel-файл в облачном хранилище не найден.")
+                        st.caption("В Excel этого отчета встроенные фотографии не найдены.")
 
-        else:
+                    st.download_button(
+                        "📥 Скачать Excel этого отчета",
+                        data=selected_bytes,
+                        file_name=_safe_download_name(
+                            str(selected_report.get("report_no") or "report"),
+                            str(selected_report.get("result_status") or ""),
+                        ),
+                        mime=EXCEL_MIME,
+                        key=f"download_selected_excel_{selected_id}",
+                    )
+                else:
+                    st.warning("Не удалось загрузить Excel из облака, поэтому фотографии пока недоступны.")
+            else:
+                st.info("Для этого отчета Excel-файл в облачном хранилище не найден.")
+
+        if not report_list and not selected_report:
             st.info("История отчетов пока пуста.")
 
     except Exception as e:
@@ -896,6 +957,11 @@ with tab_archive:
 
 
 with tab_new:
+    top_new_col, top_note_col = st.columns([1.5, 4])
+    with top_new_col:
+        st.button("＋ Создать новый отчёт", key="create_fresh_report", type="primary", use_container_width=True, on_click=_start_new_report)
+    with top_note_col:
+        st.caption("Новый отчёт создаёт чистый черновик. Уже сохранённые отчёты в архиве не изменяются.")
     st.subheader("Конфигурация инспекции")
     
     # 1. Реквизиты партии
@@ -911,7 +977,7 @@ with tab_new:
                     extracted_data = ai_service.extract_batch_info_from_image(sticker_file.getvalue())
 
         col_b1, col_b2, col_b3 = st.columns(3)
-        report_no = col_b1.text_input("Report No.", value="QC-" + st.session_state.auth_user.id[:5].upper())
+        report_no = col_b1.text_input("Report No.", key="draft_report_no")
         client_name = col_b2.text_input("Клиент / Заказчик")
         supplier_name = col_b3.text_input("Фабрика / Поставщик", value=extracted_data.get("supplier", ""))
         

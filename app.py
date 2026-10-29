@@ -573,25 +573,68 @@ if "last_excel_name" not in st.session_state:
 if not st.session_state.auth_user:
     st.markdown("<h2 style='text-align: center; color: #1E293B;'>QC Surveyor Portal</h2>", unsafe_allow_html=True)
     with st.container(border=True):
-        auth_mode = st.radio("Режим входа", ["Вход", "Регистрация"], horizontal=True)
-        email = st.text_input("Email")
-        pwd = st.text_input("Пароль", type="password")
-        
+        auth_mode = st.radio("Режим входа", ["Вход", "Регистрация", "Восстановить пароль", "Повторить письмо подтверждения"], horizontal=False)
+        email = st.text_input("Email", key="auth_email").strip().lower()
+        pwd = st.text_input("Пароль", type="password", key="auth_password")
+
         if auth_mode == "Вход" and st.button("Войти", type="primary", use_container_width=True):
-            try:
-                res = supabase.auth.sign_in_with_password({"email": email, "password": pwd})
-                if res.user:
-                    st.session_state.auth_user = res.user
-                    st.rerun()
-            except Exception:
-                st.error("Не удалось войти. Проверьте email и пароль.")
+            if not email or not pwd:
+                st.warning("Введите email и пароль.")
+            else:
+                try:
+                    res = supabase.auth.sign_in_with_password({"email": email, "password": pwd})
+                    if getattr(res, "user", None):
+                        st.session_state.auth_user = res.user
+                        st.rerun()
+                    else:
+                        st.error("Supabase не вернул пользователя. Проверьте подтверждение email в настройках проекта.")
+                except Exception as e:
+                    err = str(e)
+                    if "email_not_confirmed" in err.lower() or "email not confirmed" in err.lower():
+                        st.error("Email ещё не подтверждён. Выберите «Повторить письмо подтверждения». Если письмо не приходит, администратору нужно проверить SMTP и настройки подтверждения email в Supabase.")
+                    elif "invalid login credentials" in err.lower():
+                        st.error("Supabase отклонил email или пароль. Если вы только что зарегистрировались, возможно, email не подтверждён или регистрация не завершилась. Можно запросить письмо подтверждения ниже.")
+                    else:
+                        st.error(f"Не удалось войти: {err}")
 
         elif auth_mode == "Регистрация" and st.button("Создать аккаунт", type="primary", use_container_width=True):
-            try:
-                res = supabase.auth.sign_up({"email": email, "password": pwd})
-                st.success("Регистрация успешна. Теперь можно войти.")
-            except Exception:
-                st.error("Не удалось создать аккаунт. Попробуйте другой email или повторите позже.")
+            if not email or not pwd:
+                st.warning("Введите email и пароль.")
+            elif len(pwd) < 6:
+                st.warning("Пароль должен содержать не менее 6 символов.")
+            else:
+                try:
+                    res = supabase.auth.sign_up({"email": email, "password": pwd})
+                    if getattr(res, "session", None) and getattr(res, "user", None):
+                        st.session_state.auth_user = res.user
+                        st.success("Аккаунт создан, вы вошли в систему.")
+                        st.rerun()
+                    elif getattr(res, "user", None):
+                        st.success("Аккаунт создан, но Supabase не выдал сессию. Скорее всего, требуется подтверждение email. Проверьте папки «Спам» и «Промоакции». Если письмо не приходит, выберите «Повторить письмо подтверждения»; если и это не поможет, нужно настроить SMTP в Supabase.")
+                    else:
+                        st.error("Supabase не вернул данные нового пользователя. Проверьте настройки Auth в Supabase.")
+                except Exception as e:
+                    st.error(f"Не удалось создать аккаунт: {str(e)}")
+
+        elif auth_mode == "Восстановить пароль" and st.button("Отправить ссылку для сброса пароля", type="primary", use_container_width=True):
+            if not email:
+                st.warning("Введите email, на который зарегистрирован аккаунт.")
+            else:
+                try:
+                    supabase.auth.reset_password_for_email(email)
+                    st.success("Запрос на сброс пароля отправлен. Проверьте входящие письма и папку «Спам». Если письма нет, проверьте SMTP в Supabase.")
+                except Exception as e:
+                    st.error(f"Не удалось отправить запрос: {str(e)}")
+
+        elif auth_mode == "Повторить письмо подтверждения" and st.button("Отправить письмо ещё раз", type="primary", use_container_width=True):
+            if not email:
+                st.warning("Введите email, указанный при регистрации.")
+            else:
+                try:
+                    supabase.auth.resend({"type": "signup", "email": email})
+                    st.success("Запрос на повторную отправку выполнен. Проверьте входящие письма и папку «Спам». Если письмо не приходит, вероятно, нужно настроить SMTP или проверить настройки подтверждения email в Supabase.")
+                except Exception as e:
+                    st.error(f"Не удалось отправить письмо подтверждения: {str(e)}")
     st.stop()
 
 # Панель пользователя

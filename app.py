@@ -467,6 +467,74 @@ def download_excel_from_storage(storage_path: str) -> bytes | None:
         return None
 
 
+def append_photos_to_existing_excel(excel_bytes: bytes, new_photos: list[tuple[str, bytes]], report_data: dict) -> bytes:
+    """Сохраняет существующий Excel и добавляет новые фото в отдельное приложение, не удаляя прежние данные."""
+    wb = openpyxl.load_workbook(io.BytesIO(excel_bytes))
+    ws = wb.active
+
+    # Обновляем основные поля в исходной шапке отчёта, если структура листа стандартная.
+    updates = {
+        "C4": report_data.get("report_no", ""),
+        "G4": report_data.get("inspection_date", ""),
+        "C5": report_data.get("client_name", ""),
+        "G5": report_data.get("inspector_id", ""),
+        "C6": report_data.get("supplier_name", ""),
+        "G6": report_data.get("order_no", ""),
+        "C7": f"{report_data.get('item_name', '')} / {report_data.get('sku', '')}",
+        "G7": report_data.get("result_status", ""),
+    }
+    for cell_ref, value in updates.items():
+        try:
+            ws[cell_ref] = str(value or "")
+        except Exception:
+            pass
+
+    start_row = ws.max_row + 3
+    row = start_row
+    if new_photos:
+        ws.merge_cells(start_row=start_row, start_column=2, end_row=start_row, end_column=9)
+        title_cell = ws.cell(start_row, 2, "ADDITIONAL PHOTOS — UPDATED REPORT")
+        title_cell.font = Font(name="Calibri", size=14, bold=True, color="FFFFFF")
+        title_cell.fill = PatternFill(start_color="334155", end_color="334155", fill_type="solid")
+        title_cell.alignment = Alignment(horizontal="center", vertical="center")
+        ws.row_dimensions[start_row].height = 28
+        row = start_row + 2
+
+    for idx, (section_title, raw) in enumerate(new_photos, start=1):
+        try:
+            with Image.open(io.BytesIO(raw)) as source:
+                image = source.convert("RGB")
+                buffer = io.BytesIO()
+                image.save(buffer, format="JPEG", quality=90)
+                buffer.seek(0)
+            ws.cell(row, 2, f"{section_title} — {idx}")
+            ws.cell(row, 2).font = Font(bold=True, color="334155")
+            photo = OpenPyXLImage(buffer)
+            photo.width = 420
+            photo.height = max(120, int(photo.width * (image.height / max(1, image.width))))
+            ws.add_image(photo, f"B{row + 1}")
+            row += max(22, int(photo.height / 20) + 3)
+        except Exception:
+            continue
+
+    # Добавляем актуальное заключение в конец, сохраняя исходный лист и существующие замеры.
+    row += 1
+    ws.merge_cells(start_row=row, start_column=2, end_row=row, end_column=9)
+    ws.cell(row, 2, "UPDATED COMMENTS AND CONCLUSION")
+    ws.cell(row, 2).font = Font(bold=True, color="FFFFFF")
+    ws.cell(row, 2).fill = PatternFill(start_color="334155", end_color="334155", fill_type="solid")
+    row += 1
+    comments = str(report_data.get("comments") or "")
+    for line in (comments.splitlines() or [""]):
+        ws.cell(row, 2, line)
+        row += 1
+
+    output = io.BytesIO()
+    wb.save(output)
+    wb.close()
+    return output.getvalue()
+
+
 PHOTO_SECTION_TITLES = {
     "PRODUCT WORKMANSHIP PHOTOS": "Продукция",
     "PACKAGING & CARTON DETAILS": "Упаковка и маркировка",
@@ -533,7 +601,7 @@ def show_photo_viewer():
     # Диалог занимает около 80% ширины окна приложения; фото не растягивается по высоте.
     st.markdown(
         """<style>
-        div[role="dialog"] { width: 80vw !important; max-width: 80vw !important; }
+        div[role="dialog"] { width: 80vw !important; max-width: 80vw !important; min-width: 80vw !important; }
         div[role="dialog"] img { max-height: 70vh; object-fit: contain; }
         </style>""",
         unsafe_allow_html=True,
@@ -606,7 +674,7 @@ def render_clickable_photo_gallery(photos: list, height: int | None = None) -> N
 .thumb{{border:0;background:transparent;color:inherit;cursor:pointer;text-align:center;padding:0;min-width:0}}
 .thumb img{{width:100%;height:110px;object-fit:cover;border-radius:8px;display:block;background:#222}}
 .thumb span{{display:block;font-size:12px;padding-top:3px;color:#b7b7b7}}
-.overlay{{display:none;position:absolute;inset:0;background:rgba(8,8,12,.97);z-index:99;padding:16px;flex-direction:column;align-items:center;justify-content:center}}
+.overlay{{display:none;position:fixed;inset:0;width:100%;height:100%;background:rgba(8,8,12,.98);z-index:9999;padding:18px;flex-direction:column;align-items:center;justify-content:center}}
 .overlay.open{{display:flex}} .top{{width:100%;display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:10px}}
 .action{{border:1px solid #666;border-radius:8px;padding:9px 13px;background:#222;color:white;cursor:pointer;font-size:15px}}
 .photo-wrap{{display:flex;align-items:center;justify-content:center;gap:12px;width:100%;height:calc(100% - 45px);min-height:0}}
@@ -633,7 +701,7 @@ document.getElementById('close').addEventListener('click',()=>overlay.classList.
 document.getElementById('prev').addEventListener('click',()=>show(current-1));document.getElementById('next').addEventListener('click',()=>show(current+1));
 document.addEventListener('keydown',e=>{{if(!overlay.classList.contains('open'))return;if(e.key==='Escape')overlay.classList.remove('open');if(e.key==='ArrowLeft')show(current-1);if(e.key==='ArrowRight')show(current+1)}});
 </script></body></html>'''
-    components.html(html, height=height, scrolling=False)
+    components.html(html, height=max(height, 760), scrolling=False)
 
 
 def _make_report_number() -> str:
@@ -932,6 +1000,20 @@ with tab_archive:
                         height=160,
                     )
 
+                    st.markdown("#### Добавить фотографии к отчёту")
+                    st.caption("Существующие фотографии и замеры сохраняются. Новые фотографии добавятся в конец Excel-файла.")
+                    edit_photo_section = st.selectbox(
+                        "Раздел для новых фотографий",
+                        ["Продукция", "Упаковка и маркировка", "Стикеры и штрихкоды", "Дефекты"],
+                        key=f"edit_photo_section_{selected_id}",
+                    )
+                    edited_photo_uploads = st.file_uploader(
+                        "Загрузить дополнительные фотографии",
+                        type=["jpg", "jpeg", "png", "webp"],
+                        accept_multiple_files=True,
+                        key=f"edit_photos_{selected_id}",
+                    )
+
                     save_col, cancel_col = st.columns(2)
                     save_changes = save_col.form_submit_button(
                         "💾 Сохранить изменения",
@@ -967,6 +1049,34 @@ with tab_archive:
                             "result_status": edited_status,
                             "comments": edited_comments,
                         })
+
+                        # Если добавлены фото, обновляем существующий Excel, не теряя исходные замеры и изображения.
+                        if True:
+                            selected_path_for_update = _storage_object_path(selected_report.get("excel_url"))
+                            old_excel_bytes = download_excel_from_storage(selected_path_for_update) if selected_path_for_update else None
+                            if not old_excel_bytes:
+                                raise RuntimeError("Не удалось загрузить исходный Excel из Supabase; фотографии не сохранены.")
+                            section_key_map = {
+                                "Продукция": "PRODUCT WORKMANSHIP PHOTOS",
+                                "Упаковка и маркировка": "PACKAGING & CARTON DETAILS",
+                                "Стикеры и штрихкоды": "LABELS & BARCODES VERIFICATION",
+                                "Дефекты": "DEFECT DETAILS & LOG",
+                            }
+                            updated_for_excel = dict(updated_report_data)
+                            updated_for_excel["inspection_date"] = normalized_date
+                            updated_for_excel["inspector_id"] = st.session_state.auth_user.email
+                            added_photos = [(section_key_map[edit_photo_section], item.getvalue()) for item in (edited_photo_uploads or [])]
+                            refreshed_excel = append_photos_to_existing_excel(old_excel_bytes, added_photos, updated_for_excel)
+                            upload_path = selected_path_for_update
+                            upload_result = supabase.storage.from_(QC_REPORTS_BUCKET).upload(
+                                upload_path,
+                                refreshed_excel,
+                                file_options={"content-type": EXCEL_MIME, "upsert": "true"},
+                            )
+                            if _storage_call_failed(upload_result):
+                                raise RuntimeError("Supabase не подтвердил обновление Excel-файла.")
+                            st.session_state[f"selected_excel_{selected_id}"] = refreshed_excel
+                            st.session_state[f"selected_photos_{selected_id}"] = extract_images_from_excel(refreshed_excel)
 
                         update_fields = {
                             "report_no": edited_report_no.strip(),

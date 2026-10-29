@@ -1,0 +1,6 @@
+streamlit
+openai
+openpyxl
+Pillow
+supabase
+pandas

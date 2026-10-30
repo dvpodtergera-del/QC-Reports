@@ -22,6 +22,53 @@ if BASE_DIR not in sys.path:
 import ai_service
 
 # ==============================================================================
+# РАСЧЁТ ЗАМЕРОВ
+# ==============================================================================
+MEASURE_STATUS_LABELS = {
+    "PASS": "в допуске",
+    "FAIL": "вне допуска",
+    "NOT_MEASURED": "не измерено",
+    "INVALID": "ошибка ввода",
+    "NO_TARGET": "нет эталона/допуска",
+}
+
+
+def _to_number(value):
+    """Число из значения спецификации или None, если это не число."""
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    try:
+        return float(str(value).strip().replace(",", "."))
+    except (TypeError, ValueError):
+        return None
+
+
+def evaluate_measurement(raw, ideal, tol_minus, tol_plus) -> dict:
+    """Оценивает один замер. Пустое поле никогда не считается PASS."""
+    text = "" if raw is None else str(raw).strip()
+    if not text:
+        return {"status": "NOT_MEASURED", "actual": None, "diff": None}
+    try:
+        actual = float(text.replace(",", "."))
+    except ValueError:
+        return {"status": "INVALID", "actual": None, "diff": None, "raw": text}
+
+    ideal_n = _to_number(ideal)
+    t_min = _to_number(tol_minus)
+    t_plus = _to_number(tol_plus)
+    if ideal_n is None or t_min is None or t_plus is None:
+        return {"status": "NO_TARGET", "actual": actual, "diff": None}
+
+    diff = round(actual - ideal_n, 2)
+    # Граница допуска включительно; небольшой запас против ошибок округления float.
+    eps = 1e-9
+    is_fail = diff < -abs(t_min) - eps or diff > abs(t_plus) + eps
+    return {"status": "FAIL" if is_fail else "PASS", "actual": actual, "diff": diff}
+
+
+# ==============================================================================
 # ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ СТИЛИЗАЦИИ EXCEL
 # ==============================================================================
 def apply_range_style(ws, min_col, min_row, max_col, max_row, border=None, fill=None):
@@ -187,8 +234,8 @@ def create_full_qc_report(
             ws.cell(row=curr_row, column=3, value=pom.get("description", "")).alignment = Alignment(horizontal="left", vertical="center")
             apply_range_style(ws, 3, curr_row, 5, curr_row, border=thin_border)
 
-            ws.cell(row=curr_row, column=6, value=f"-{pom.get('tol_minus', 1.0)}").alignment = Alignment(horizontal="center", vertical="center")
-            ws.cell(row=curr_row, column=7, value=f"+{pom.get('tol_plus', 1.0)}").alignment = Alignment(horizontal="center", vertical="center")
+            ws.cell(row=curr_row, column=6, value=f"-{pom.get('tol_minus')}" if pom.get('tol_minus') is not None else "—").alignment = Alignment(horizontal="center", vertical="center")
+            ws.cell(row=curr_row, column=7, value=f"+{pom.get('tol_plus')}" if pom.get('tol_plus') is not None else "—").alignment = Alignment(horizontal="center", vertical="center")
             ws.cell(row=curr_row, column=6).border = thin_border
             ws.cell(row=curr_row, column=7).border = thin_border
 
@@ -196,8 +243,15 @@ def create_full_qc_report(
             for sample in measured_samples:
                 item = next((x for x in sample.get("items", []) if x.get("code") == pom.get("code")), None)
                 if item:
-                    c_act = ws.cell(row=curr_row, column=s_col, value=item.get("actual", "-"))
-                    c_diff = ws.cell(row=curr_row, column=s_col + 1, value=item.get("diff", 0))
+                    st_code = item.get("status")
+                    act_val = item.get("actual")
+                    diff_val = item.get("diff")
+                    if st_code not in ("PASS", "FAIL"):
+                        # Нет полноценного результата: не измерено / ошибка ввода / нет эталона.
+                        act_val = act_val if (st_code == "NO_TARGET" and act_val is not None) else "—"
+                        diff_val = "—"
+                    c_act = ws.cell(row=curr_row, column=s_col, value=act_val if act_val is not None else "—")
+                    c_diff = ws.cell(row=curr_row, column=s_col + 1, value=diff_val if diff_val is not None else "—")
                     
                     c_act.border = thin_border
                     c_diff.border = thin_border
@@ -205,12 +259,15 @@ def create_full_qc_report(
                     c_diff.alignment = Alignment(horizontal="center", vertical="center")
                     c_act.font = Font(name="Calibri", size=9)
 
-                    if item.get("status") == "FAIL":
+                    if st_code == "FAIL":
                         c_diff.fill = PatternFill(start_color=c_fail_bg, fill_type="solid")
                         c_diff.font = Font(name="Calibri", size=9, bold=True, color=c_fail_fg)
-                    else:
+                    elif st_code == "PASS":
                         c_diff.fill = PatternFill(start_color=c_pass_bg, fill_type="solid")
                         c_diff.font = Font(name="Calibri", size=9, bold=True, color=c_pass_fg)
+                    else:
+                        c_diff.fill = PatternFill(start_color="E5E7EB", fill_type="solid")
+                        c_diff.font = Font(name="Calibri", size=9, bold=True, color="4B5563")
                 s_col += 2
 
             curr_row += 1
@@ -1414,15 +1471,20 @@ with tab_new:
                     for pom in spec.get("poms", []):
                         p_code = pom.get("code", "")
                         p_desc = pom.get("description", "")
-                        ideal_val = pom.get("specs", {}).get(selected_size, 0.0)
-                        t_min = pom.get("tol_minus", 1.0)
-                        t_plus = pom.get("tol_plus", 1.0)
+                        ideal_val = (pom.get("specs") or {}).get(selected_size)
+                        t_min = pom.get("tol_minus")
+                        t_plus = pom.get("tol_plus")
 
                         c1, c2, c3 = st.columns([1, 4, 3])
                         c1.write(f"**{p_code}**")
-                        c2.write(f"{p_desc} (±{t_plus})")
+                        tol_txt = f"-{t_min if t_min is not None else '?'} / +{t_plus if t_plus is not None else '?'}"
+                        c2.write(f"{p_desc} ({tol_txt})")
                         inputs[p_code] = {
-                            "val": c3.text_input(f"Замер {p_code}", placeholder=str(ideal_val), label_visibility="collapsed"),
+                            "val": c3.text_input(
+                                f"Замер {p_code}",
+                                placeholder=f"эталон {ideal_val}" if ideal_val is not None else "нет эталона",
+                                label_visibility="collapsed",
+                            ),
                             "ideal": ideal_val,
                             "desc": p_desc,
                             "t_min": t_min,
@@ -1432,16 +1494,15 @@ with tab_new:
                     if st.form_submit_button("✓ Проверить образец"):
                         sample_items = []
                         for code, item_meta in inputs.items():
-                            raw = item_meta["val"].strip().replace(",", ".")
-                            act = float(raw) if raw else item_meta["ideal"]
-                            diff = round(act - item_meta["ideal"], 2)
-                            is_fail = (diff < -item_meta["t_min"]) or (diff > item_meta["t_plus"])
+                            res = evaluate_measurement(
+                                item_meta["val"], item_meta["ideal"], item_meta["t_min"], item_meta["t_plus"]
+                            )
                             sample_items.append({
                                 "code": code,
                                 "desc": item_meta["desc"],
-                                "actual": act,
-                                "diff": diff,
-                                "status": "FAIL" if is_fail else "PASS"
+                                "actual": res["actual"],
+                                "diff": res["diff"],
+                                "status": res["status"],
                             })
                         
                         st.session_state.measured_samples.append({
@@ -1454,8 +1515,21 @@ with tab_new:
                 if st.session_state.measured_samples:
                     st.markdown("**Готовые замеры в отчете:**")
                     for smp in st.session_state.measured_samples:
-                        fails = sum(1 for it in smp["items"] if it["status"] == "FAIL")
-                        st.write(f"- Образец #{smp['sample_no']} ({smp['size']}): " + (f"⚠️ Отклонений: {fails}" if fails else "✅ В норме"))
+                        items = smp.get("items", [])
+                        cnt = {k: sum(1 for it in items if it.get("status") == k) for k in MEASURE_STATUS_LABELS}
+                        head = f"- Образец #{smp['sample_no']} ({smp['size']}): "
+                        if items and cnt["PASS"] == len(items):
+                            st.write(head + "✅ В норме")
+                        else:
+                            parts = [f"{MEASURE_STATUS_LABELS[k]}: {cnt[k]}" for k in ("FAIL", "NOT_MEASURED", "INVALID", "NO_TARGET") if cnt[k]]
+                            st.write(head + "⚠️ " + "; ".join(parts))
+                        bad_codes = [it.get("code") for it in items if it.get("status") == "INVALID"]
+                        if bad_codes:
+                            st.warning(
+                                f"Образец #{smp['sample_no']}: не удалось распознать число в пунктах "
+                                + ", ".join(str(c) for c in bad_codes)
+                                + ". Вводите только число, например 72.5 или 72,5."
+                            )
 
     # 3. Фотоматериалы (до 12 фото на блок, чистая галерея превью)
     photos_data = {"products": [], "packing": [], "labels": [], "defects": []}

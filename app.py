@@ -442,10 +442,7 @@ st.set_page_config(page_title="QC Inspector Cloud", page_icon="📋", layout="wi
 
 
 st.markdown("""<style id="qc-disable-pull-to-refresh">
-html, body, #root, .stApp, [data-testid="stApp"],
-[data-testid="stAppViewContainer"], [data-testid="stMain"], section.main {
-    overscroll-behavior-y: none !important;
-}
+html, body, #root, .stApp, [data-testid="stApp"], [data-testid="stAppViewContainer"], [data-testid="stMain"], section.main { overscroll-behavior-y: none !important; }
 </style>""", unsafe_allow_html=True)
 
 @st.cache_resource
@@ -859,7 +856,6 @@ def render_clickable_photo_gallery(photos: list, height: int | None = None) -> N
         st.caption("Не удалось подготовить фотографии для просмотра.")
         return
     import json
-    # Initial iframe height is replaced by the measured content height in JavaScript.
     initial_height = 520
     gallery_json = json.dumps(items, ensure_ascii=False).replace("</", "<\\/")
     html = f'''<!doctype html><html><head><meta charset="utf-8"><style>
@@ -867,7 +863,7 @@ def render_clickable_photo_gallery(photos: list, height: int | None = None) -> N
 .gallery{{height:auto;overflow:visible;display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px 8px;padding:2px;align-content:start}}
 .sec{{grid-column:1/-1;font-size:13px;font-weight:700;color:#e5e7eb;padding:4px 2px 0;margin:0}}
 .thumb{{touch-action:pan-y pinch-zoom;border:0;background:transparent;color:inherit;cursor:pointer;text-align:center;padding:0;min-width:0}}
-.thumb img{{width:100%;height:110px;object-fit:cover;border-radius:8px;display:block;background:#222;user-select:none;-webkit-user-drag:none}}
+.thumb img{{width:100%;height:110px;object-fit:cover;border-radius:8px;display:block;background:#222}}
 .thumb span{{display:block;font-size:12px;padding-top:3px;color:#b7b7b7}}
 .overlay{{display:none;position:fixed;inset:0;width:100%;height:100%;background:rgba(8,8,12,.98);z-index:9999;padding:8px;flex-direction:column;align-items:center;justify-content:center}}
 .overlay.open{{display:flex}} .top{{width:100%;display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:10px}}
@@ -875,10 +871,8 @@ def render_clickable_photo_gallery(photos: list, height: int | None = None) -> N
 .photo-wrap{{position:relative;display:flex;align-items:center;justify-content:center;width:100%;flex:1;min-height:0}}
 .big{{max-width:100%;max-height:100%;object-fit:contain;border-radius:5px}} .arrow{{position:absolute;top:50%;transform:translateY(-50%);font-size:25px;min-width:42px;padding:10px 5px;z-index:2}} #prev{{left:4px}} #next{{right:4px}}
 @media(max-width:600px){{.gallery{{grid-template-columns:repeat(2,minmax(0,1fr))}}.thumb img{{height:96px}}.big{{max-width:100%}}.arrow{{min-width:30px}}}}
-.gallery-controls{{display:flex;justify-content:center;gap:8px;flex-wrap:wrap;padding:12px 2px 4px}}
-.gallery-controls button{{min-height:44px}} .gallery-controls[hidden]{{display:none}}
-</style></head><body><div id="gallery-content"><div class="gallery" id="gallery"></div>
-<div class="gallery-controls" id="gallery-controls"><button class="action" type="button" id="show-more"></button><button class="action" type="button" id="show-less" hidden>Свернуть</button></div></div>
+.controls{{display:flex;justify-content:center;gap:8px;padding:12px 2px 4px}} .controls[hidden]{{display:none}} .controls button{{min-height:44px}}
+</style></head><body><div id="gallery-content"><div class="gallery" id="gallery"></div><div class="controls" id="controls"><button type="button" class="action" id="more"></button><button type="button" class="action" id="less" hidden>Свернуть</button></div></div>
 <div class="overlay" id="overlay" role="dialog" aria-modal="true"><div class="top"><span id="counter">Фото 1 из {len(items)}</span><button class="action" id="close">✕ Закрыть</button></div>
 <div class="photo-wrap"><button class="action arrow" id="prev">←</button><img class="big" id="big" alt="Увеличенная фотография"><button class="action arrow" id="next">→</button></div></div>
 <script>
@@ -895,49 +889,43 @@ big.addEventListener('load',fit);const ro=new ResizeObserver(fit);ro.observe(big
 function closeViewer(){{overlay.classList.remove('open');if(host)host.style.display='none';if(document.fullscreenElement)document.exitFullscreen().catch(()=>{{}})}}
 
 function show(i){{current=(i+photos.length)%photos.length;big.src=photos[current].src;counter.textContent=`Фото ${{current+1}} из ${{photos.length}}`;overlay.classList.add('open');if(host)host.style.display='block';else if(!document.fullscreenElement&&document.documentElement.requestFullscreen)document.documentElement.requestFullscreen().catch(()=>{{}});fit()}}
-const batchSize=6;let visibleCount=Math.min(batchSize,photos.length),heightFrame=0,lastHeight=0;
-const content=document.getElementById('gallery-content'),controls=document.getElementById('gallery-controls'),more=document.getElementById('show-more'),less=document.getElementById('show-less');
-function scheduleHeight(){{
- if(heightFrame)return;
- heightFrame=requestAnimationFrame(()=>{{
-  heightFrame=0;const measured=Math.max(1,Math.ceil(content.getBoundingClientRect().height)+4);
-  if(measured===lastHeight)return;lastHeight=measured;
-  try{{if(window.frameElement)window.frameElement.style.height=measured+'px'}}catch(e){{}}
-  window.parent.postMessage({{isStreamlitMessage:true,type:'streamlit:setFrameHeight',height:measured}},'*');
+const step=6;let visibleCount=Math.min(step,photos.length),raf=0,lastHeight=0;
+const content=document.getElementById('gallery-content'),controls=document.getElementById('controls'),more=document.getElementById('more'),less=document.getElementById('less');
+function resizeGallery(){{
+ if(raf)return;raf=requestAnimationFrame(()=>{{raf=0;const h=Math.ceil(content.getBoundingClientRect().height)+4;
+ if(h===lastHeight)return;lastHeight=h;
+ try{{if(window.frameElement){{window.frameElement.style.height=h+'px';window.frameElement.setAttribute('height',String(h))}}}}catch(e){{}}
+ window.parent.postMessage({{isStreamlitMessage:true,type:'streamlit:setFrameHeight',height:h}},'*');
  }});
 }}
 function renderGallery(){{
  gallery.replaceChildren();let lastSection=null;
  photos.slice(0,visibleCount).forEach((p,i)=>{{
-  if(p.section&&p.section!==lastSection){{const h=document.createElement('div');h.className='sec';h.textContent=p.section;gallery.appendChild(h);lastSection=p.section}}
-  const button=document.createElement('button');button.type='button';button.className='thumb';
+  if(p.section&&p.section!==lastSection){{const h=document.createElement('div');h.className='sec';h.textContent=p.section;gallery.append(h);lastSection=p.section}}
+  const b=document.createElement('button');b.type='button';b.className='thumb';
   const img=document.createElement('img');img.src=p.src;img.alt=p.label;img.draggable=false;img.loading='lazy';
-  const label=document.createElement('span');label.textContent=p.label;
-  button.append(img,label);
-  let startX=0,startY=0,moved=false;
-  button.addEventListener('pointerdown',e=>{{startX=e.clientX;startY=e.clientY;moved=false}});
-  button.addEventListener('pointermove',e=>{{if(Math.hypot(e.clientX-startX,e.clientY-startY)>10)moved=true}});
-  button.addEventListener('pointercancel',()=>{{moved=true}});
-  button.addEventListener('click',e=>{{if(moved&&e.detail!==0){{e.preventDefault();return}}show(i)}});
-  gallery.appendChild(button);
+  const label=document.createElement('span');label.textContent=p.label;b.append(img,label);
+  let x=0,y=0,moved=false;
+  b.addEventListener('pointerdown',e=>{{x=e.clientX;y=e.clientY;moved=false}});
+  b.addEventListener('pointermove',e=>{{if(Math.hypot(e.clientX-x,e.clientY-y)>10)moved=true}});
+  b.addEventListener('pointercancel',()=>{{moved=true}});
+  b.addEventListener('click',e=>{{if(moved&&e.detail!==0){{e.preventDefault();return}}show(i)}});
+  gallery.append(b);
  }});
- controls.hidden=photos.length<=batchSize;
- more.hidden=visibleCount>=photos.length;
- more.textContent=`Показать ещё ${{Math.min(batchSize,photos.length-visibleCount)}} (осталось ${{photos.length-visibleCount}})`;
- less.hidden=visibleCount<=batchSize;
- scheduleHeight();
+ controls.hidden=photos.length<=step;more.hidden=visibleCount>=photos.length;less.hidden=visibleCount<=step;
+ more.textContent=`Показать ещё ${{Math.min(step,photos.length-visibleCount)}} (осталось ${{photos.length-visibleCount}})`;
+ resizeGallery();
 }}
-more.addEventListener('click',()=>{{visibleCount=Math.min(photos.length,visibleCount+batchSize);renderGallery()}});
-less.addEventListener('click',()=>{{visibleCount=Math.min(batchSize,photos.length);renderGallery()}});
-const galleryResize=new ResizeObserver(scheduleHeight);galleryResize.observe(content);
-window.addEventListener('resize',scheduleHeight);
-renderGallery();
+more.addEventListener('click',()=>{{visibleCount=Math.min(photos.length,visibleCount+step);renderGallery()}});
+less.addEventListener('click',()=>{{visibleCount=Math.min(step,photos.length);renderGallery()}});
+const galleryObserver=new ResizeObserver(resizeGallery);galleryObserver.observe(content);
+window.addEventListener('resize',resizeGallery);renderGallery();
 root.getElementById('close').addEventListener('click',closeViewer);
 root.getElementById('prev').addEventListener('click',()=>show(current-1));root.getElementById('next').addEventListener('click',()=>show(current+1));
 function onKey(e){{if(!overlay.classList.contains('open'))return;if(e.key==='Escape')closeViewer();if(e.key==='ArrowLeft')show(current-1);if(e.key==='ArrowRight')show(current+1)}}
 keyDocument.addEventListener('keydown',onKey);
 overlay.addEventListener('click',e=>{{if(e.target!==big&&!e.target.closest('button'))closeViewer()}});
-function cleanup(){{galleryResize.disconnect();window.removeEventListener('resize',scheduleHeight);if(heightFrame)cancelAnimationFrame(heightFrame);ro.disconnect();keyDocument.removeEventListener('keydown',onKey);if(host)host.remove()}}
+function cleanup(){{galleryObserver.disconnect();window.removeEventListener('resize',resizeGallery);if(raf)cancelAnimationFrame(raf);ro.disconnect();keyDocument.removeEventListener('keydown',onKey);if(host)host.remove()}}
 window.addEventListener('pagehide',cleanup);
 if(host&&window.frameElement){{const frame=window.frameElement;const observer=new window.parent.MutationObserver(()=>{{if(!frame.isConnected){{cleanup();observer.disconnect()}}}});observer.observe(keyDocument.body,{{childList:true,subtree:true}});window.addEventListener('pagehide',()=>observer.disconnect())}}
 </script></body></html>'''
@@ -1175,7 +1163,8 @@ with tab_archive:
             if edit_state_key not in st.session_state:
                 st.session_state[edit_state_key] = False
 
-            edit_col, _ = st.columns([2, 5])
+            edit_col, download_col, _ = st.columns([2, 2, 3])
+            selected_excel_download = download_col.empty()
             if not st.session_state[edit_state_key]:
                 if edit_col.button(
                     "✏️ Редактировать отчет",
@@ -1408,7 +1397,7 @@ with tab_archive:
                     else:
                         st.caption("В Excel этого отчета встроенные фотографии не найдены.")
 
-                    st.download_button(
+                    selected_excel_download.download_button(
                         "📥 Скачать Excel этого отчета",
                         data=selected_bytes,
                         file_name=_safe_download_name(
@@ -1417,6 +1406,7 @@ with tab_archive:
                         ),
                         mime=EXCEL_MIME,
                         key=f"download_selected_excel_{selected_id}",
+                        use_container_width=True,
                     )
                 else:
                     st.warning("Не удалось загрузить Excel из облака, поэтому фотографии пока недоступны.")

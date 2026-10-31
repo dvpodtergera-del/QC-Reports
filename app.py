@@ -1092,10 +1092,9 @@ def _make_report_number() -> str:
 
 
 def _start_new_report() -> None:
-    """Start a fresh draft before widgets are rendered; preserve login/archive state."""
     st.session_state['draft_epoch'] = int(st.session_state.get('draft_epoch', 0)) + 1
-    for key in list(st.session_state.keys()):
-        if str(key).startswith(('new_draft_', 'sz_', 'measurement_', 'sample_form_', 'f_')) and not str(key).startswith(('measurement_draft_', 'measurement_edit_')):
+    for key in list(st.session_state):
+        if str(key).startswith('new_draft_'):
             del st.session_state[key]
     st.session_state.reference_spec = None
     st.session_state.measured_samples = []
@@ -1106,14 +1105,34 @@ def _start_new_report() -> None:
     st.session_state.draft_report_no = _make_report_number()
     st.session_state.draft_inspection_date = date.today()
     st.session_state.draft_extracted_data = {}
+    st.session_state.draft_source = 'manual'
     st.session_state.selected_report_id = None
     st.session_state.photo_viewer_open = False
     st.session_state.photo_viewer_images = []
-    st.session_state['main_section'] = 'new'
+    st.session_state.main_section = 'new'
 
 
 def _open_archive() -> None:
-    st.session_state['main_section'] = 'archive'
+    current = st.session_state.get('selected_report_id')
+    if current is not None:
+        st.session_state['editing_report_'+str(current)] = False
+        st.session_state.pop('measurement_draft_'+str(current), None)
+    st.session_state.selected_report_id = None
+    st.session_state.photo_viewer_open = False
+    st.session_state.main_section = 'archive'
+
+
+def _open_report(report_id) -> None:
+    report_id = str(report_id)
+    st.session_state.selected_report_id = report_id
+    st.session_state['editing_report_'+report_id] = False
+    st.session_state.pop('measurement_draft_'+report_id, None)
+    st.session_state.photo_viewer_open = False
+    st.session_state.main_section = 'archive'
+
+
+def _select_batch_source(source) -> None:
+    st.session_state.draft_source = source
 
 
 def _archive_card_label(report):
@@ -1126,22 +1145,19 @@ def _archive_card_label(report):
         except (ValueError, TypeError): payload = {}
     if not isinstance(payload, dict): payload = {}
     client = str(report.get('client_name') or payload.get('client_name') or 'Клиент не указан').strip()
-    number = str(report.get('report_no') or 'Без номера').strip()
-    if len(number) > 12:
-        target = max(10, (len(number) + 1) // 2)
-        left = (target - 1) // 2
-        number = number[:left] + '…' + number[-(target - 1 - left):]
-    raw_day = str(report.get('inspection_date') or '')
-    try: day = date.fromisoformat(raw_day).strftime('%d.%m.%Y')
-    except (ValueError, TypeError): day = raw_day or 'Дата не указана'
+    number = str(report.get('report_no') or 'Без номера')
+    if len(number)>12:
+        target=max(10,(len(number)+1)//2);left=(target-1)//2
+        number=number[:left]+'…'+number[-(target-1-left):]
+    try: day=date.fromisoformat(str(report.get('inspection_date') or '')).strftime('%d.%m.%Y')
+    except (ValueError,TypeError):day=str(report.get('inspection_date') or 'Дата не указана')
     try:
-        created = datetime.fromisoformat(str(report.get('created_at') or '').replace('Z', '+00:00'))
-        if created.tzinfo is None: created = created.replace(tzinfo=timezone.utc)
-        clock = created.astimezone(timezone.utc).strftime('%H:%M') + ' UTC'
-    except (ValueError, TypeError): clock = 'Время не указано'
-    def safe(text):
-        text = ' '.join(str(text).split())
-        return re.sub(r'([\\`*_{}\[\]()<>#+!|])', r'\\\1', text)
+        created=datetime.fromisoformat(str(report.get('created_at') or '').replace('Z','+00:00'))
+        if created.tzinfo is None:created=created.replace(tzinfo=timezone.utc)
+        clock=created.astimezone(timezone.utc).strftime('%H:%M')+' UTC'
+    except (ValueError,TypeError):clock='Время не указано'
+    def safe(value):
+        return re.sub(r'([\\`*_{}\[\]()<>#+!|])',r'\\\1',' '.join(str(value).split()))
     return f"**{safe(client)}** · № {safe(number)}  \n{safe(day)} · {safe(clock)}"
 
 
@@ -1240,38 +1256,40 @@ if c_out.button("Выйти"):
     st.session_state.auth_user = None
     st.rerun()
 
-st.session_state.setdefault('main_section', 'new')
-st.session_state.setdefault('draft_epoch', 0)
+st.session_state.setdefault('main_section','new')
+st.session_state.setdefault('draft_epoch',0)
+st.session_state.setdefault('draft_source','manual')
 st.markdown("""<style>
+[data-testid="stButton"] button, [data-testid="stDownloadButton"] button {
+    border-radius:13px; min-height:42px; border:1px solid #b8ceca;
+    background:#edf4f2; color:#294e48; box-shadow:none; transition:background .15s;
+}
+[data-testid="stButton"] button:hover, [data-testid="stDownloadButton"] button:hover { background:#dcebe6; border-color:#82a89d; color:#203e38; }
+[data-testid="stButton"] button[kind="primary"] { background:#5b7f75; border-color:#5b7f75; color:white; }
+[data-testid="stButton"] button[kind="primary"] p { color:white; }
 .st-key-nav_new button, .st-key-nav_archive button {
-    min-height:58px; border-radius:20px; padding:13px 20px;
-    border:1px solid rgba(255,255,255,.18); color:white;
-    transition:filter .15s, transform .15s; width:100%;
+    min-height:56px; border-radius:19px; padding:13px 18px;
+    background:#dce8e2; border-color:#b4cbbf; color:#294d40;
 }
-.st-key-nav_new button { background:linear-gradient(135deg,#2563eb,#6366f1); box-shadow:0 5px 16px rgba(37,99,235,.20); }
-.st-key-nav_archive button { background:linear-gradient(135deg,#0d9488,#0891b2); box-shadow:0 5px 16px rgba(13,148,136,.20); }
-.st-key-nav_new button p, .st-key-nav_archive button p { font-size:17px; font-weight:700; color:white; }
-.st-key-nav_new button:hover, .st-key-nav_archive button:hover { filter:brightness(1.08); color:white; }
-[class*="st-key-archive_row_"] button {
-    background:linear-gradient(115deg,#ecfdf5,#e0f2fe); border:1px solid #99d8d0;
-    color:#134e4a; border-radius:16px; padding:14px 18px;
-    text-align:left; justify-content:flex-start; min-height:80px;
-}
-[class*="st-key-archive_row_"] button:hover { background:#ccfbf1; border-color:#14b8a6; color:#134e4a; }
+.st-key-nav_archive button { background:#dfedeb; border-color:#b1cfca; color:#285b55; }
+.st-key-nav_new button p, .st-key-nav_archive button p { font-size:17px; font-weight:650; }
+[class*="st-key-archive_row_"] button { background:#e7f2ef; border:1px solid #bdd7d0; color:#244f45; min-height:80px; border-radius:16px; padding:13px 17px; text-align:left; justify-content:flex-start; }
 [class*="st-key-archive_row_"] button [data-testid="stMarkdownContainer"] { width:100%; text-align:left; }
-[class*="st-key-archive_row_"] button p { font-size:16px; line-height:1.55; color:#134e4a; white-space:normal; overflow-wrap:anywhere; }
-[data-testid="stVerticalBlock"] button:focus-visible { outline:3px solid #60a5fa; outline-offset:3px; }
+[class*="st-key-archive_row_"] button p { white-space:normal; overflow-wrap:anywhere; line-height:1.55; font-size:16px; color:#244f45; }
+[class*="st-key-source_manual"] button, [class*="st-key-source_photo"] button { min-height:40px; padding:8px 12px; border-radius:12px; }
+[class*="st-key-source_manual"] button p, [class*="st-key-source_photo"] button p { font-size:14px; }
+[class*="st-key-back_archive_"] button, [class*="st-key-start_edit_"] button, [class*="st-key-download_selected_excel_"] button { min-height:44px; border-radius:12px; }
+button:focus-visible { outline:3px solid #7ba99b; outline-offset:2px; }
 @media(max-width:600px) {
-    .st-key-nav_new button, .st-key-nav_archive button { padding:12px 8px; min-height:54px; border-radius:17px; }
-    .st-key-nav_new button p, .st-key-nav_archive button p { font-size:16px; }
-    [class*="st-key-archive_row_"] button { padding:13px 14px; }
+.st-key-nav_new button, .st-key-nav_archive button { padding:12px 8px; }
+.st-key-nav_new button p, .st-key-nav_archive button p { font-size:16px; }
 }
 </style>""",unsafe_allow_html=True)
-nav_new, nav_archive = st.columns(2)
-nav_new.button('＋ Новый отчёт', key='nav_new', use_container_width=True, on_click=_start_new_report)
-nav_archive.button('Архив отчётов', key='nav_archive', use_container_width=True, on_click=_open_archive)
+nav_new,nav_archive=st.columns(2)
+nav_new.button('＋ Новый отчёт',key='nav_new',use_container_width=True,on_click=_start_new_report)
+nav_archive.button('Архив отчётов',key='nav_archive',use_container_width=True,on_click=_open_archive)
 
-if st.session_state['main_section'] == 'archive':
+if st.session_state.main_section == 'archive':
     st.subheader("Сохраненные инспекции")
 
     try:
@@ -1298,19 +1316,15 @@ if st.session_state['main_section'] == 'archive':
             st.caption('Нажмите на строку отчёта, чтобы открыть. Время создания указано в UTC.')
             for rep in report_list:
                 rid=str(rep.get('id') or '')
-                label=_archive_card_label(rep)
-                if st.button(label,key='archive_row_'+rid,use_container_width=True,disabled=not bool(rid)):
-                    st.session_state.selected_report_id=rid
-                    st.rerun()
+                st.button(_archive_card_label(rep),key='archive_row_'+rid,use_container_width=True,
+                          disabled=not bool(rid),on_click=_open_report,args=(rid,))
 
         # Просмотр выбранного отчёта вместо списка архива — не нужно прокручивать вниз.
         if selected_report:
             st.subheader(f"Отчёт: {selected_report.get('report_no') or '-'}")
 
-            if st.button("← Назад в архив", key="close_report_view"):
-                st.session_state.selected_report_id = None
-                st.session_state.photo_viewer_open = False
-                st.rerun()
+            back_col, report_edit_col, report_download_col = st.columns([1,1.2,1.4])
+            back_col.button('← В архив',key='back_archive_'+str(selected_id),use_container_width=True,on_click=_open_archive)
 
             report_data = selected_report.get("report_data") or {}
             if isinstance(report_data, str):
@@ -1328,11 +1342,11 @@ if st.session_state['main_section'] == 'archive':
             if edit_state_key not in st.session_state:
                 st.session_state[edit_state_key] = False
 
-            edit_col, download_col, _ = st.columns([2, 2, 3])
-            selected_excel_download=download_col.empty()
+            edit_col=report_edit_col
+            selected_excel_download=report_download_col.empty()
             if not st.session_state[edit_state_key]:
                 if edit_col.button(
-                    "✏️ Редактировать отчет",
+                    "Редактировать",
                     key=f"start_edit_{selected_id}",
                     use_container_width=True,
                 ):
@@ -1524,6 +1538,9 @@ if st.session_state['main_section'] == 'archive':
                         st.error("Не удалось сохранить изменения. Проверь права UPDATE в Supabase.")
                         st.caption(str(e))
 
+            if not st.session_state[edit_state_key]:
+                st.caption('Просмотр отчёта. Изменения доступны только по кнопке «Редактировать».')
+
             # Показываем актуальные поля записи из таблицы, а также сохраненные детали.
             st.markdown("### Основная информация")
             left, right = st.columns(2)
@@ -1540,15 +1557,15 @@ if st.session_state['main_section'] == 'archive':
                 st.write("**Артикул:**", selected_report.get("sku") or report_data.get("sku") or "-")
                 st.write("**Итог проверки:**", selected_report.get("result_status") or report_data.get("result_status") or "-")
 
+            view_spec, view_samples = _measurement_state(report_data)
+            _render_measurement_view(view_spec, view_samples, 'saved_'+str(selected_id))
+
             st.markdown("### Комментарии инспектора")
             comments = report_data.get("inspector_comments") or report_data.get("comments") or ""
             st.write(comments if comments else "—")
             st.markdown("### Заключение инспекции")
             conclusion = report_data.get("conclusion") or ""
             st.write(conclusion if conclusion else "—")
-
-            view_spec, view_samples = _measurement_state(report_data)
-            _render_measurement_view(view_spec, view_samples, 'saved_'+str(selected_id))
 
             # Загружаем Excel из Storage и показываем фотографии, встроенные в отчет.
             selected_path = _storage_object_path(selected_report.get("excel_url"))
@@ -1577,7 +1594,7 @@ if st.session_state['main_section'] == 'archive':
                         st.caption("В Excel этого отчета встроенные фотографии не найдены.")
 
                     selected_excel_download.download_button(
-                        "📥 Скачать Excel этого отчета",
+                        "Скачать Excel",
                         data=selected_bytes,
                         file_name=_safe_download_name(
                             str(selected_report.get("report_no") or "report"),
@@ -1600,37 +1617,41 @@ if st.session_state['main_section'] == 'archive':
         st.caption(str(e))
 
 
-if st.session_state['main_section'] == 'new':
-    st.caption('Чистый черновик создаётся кнопкой «＋ Новый отчёт». Сохранённые отчёты в архиве не меняются.')
+if st.session_state.main_section == 'new':
+    st.caption('Кнопка «＋ Новый отчёт» создаёт чистый черновик. Сохранённые отчёты не меняются.')
     st.subheader('Конфигурация инспекции')
     with st.container(border=True):
         st.markdown('**1. Данные партии и поставщика**')
-        batch_source = st.radio('Источник данных', ['Ввести вручную', 'Распознать стикер/коробку по фото'], horizontal=True, key=f"new_draft_{st.session_state['draft_epoch']}_" + str('widget_1610'))
+        st.caption('Источник данных')
+        source_manual, source_photo = st.columns([1, 1.7])
+        source_manual.button('Ввести вручную', key='source_manual', use_container_width=True, type='primary' if st.session_state.draft_source == 'manual' else 'secondary', on_click=_select_batch_source, args=('manual',))
+        source_photo.button('Распознать по фото', key='source_photo', use_container_width=True, type='primary' if st.session_state.draft_source == 'photo' else 'secondary', on_click=_select_batch_source, args=('photo',))
+        batch_source = 'Ввести вручную' if st.session_state.draft_source == 'manual' else 'Распознать стикер/коробку по фото'
         extracted_data = st.session_state.get('draft_extracted_data', {})
         if batch_source == 'Распознать стикер/коробку по фото':
-            sticker_file = st.file_uploader('Фото шиппинг-марки/стикера', type=['jpg', 'png', 'jpeg'], key=f"new_draft_{st.session_state['draft_epoch']}_" + str('widget_1614'))
-            if sticker_file and st.button('⚡ Распознать через ИИ', key=f"new_draft_{st.session_state['draft_epoch']}_" + str('widget_1615')):
+            sticker_file = st.file_uploader('Фото шиппинг-марки/стикера', type=['jpg', 'png', 'jpeg'], key=f'new_draft_{st.session_state.draft_epoch}_' + str('widget_1639'))
+            if sticker_file and st.button('⚡ Распознать через ИИ', key=f'new_draft_{st.session_state.draft_epoch}_' + str('widget_1640')):
                 with st.spinner('Извлечение данных через Qwen3-VL-Plus...'):
                     extracted_data = ai_service.extract_batch_info_from_image(sticker_file.getvalue()) or {}
-                    st.session_state.draft_extracted_data = extracted_data
-                    for field, widget in [('supplier','widget_1622'),('order_no','widget_1625'),('item_name','widget_1626'),('sku','widget_1627')]:
-                        st.session_state[f"new_draft_{st.session_state['draft_epoch']}_" + widget] = str(extracted_data.get(field) or '')
+                    st.session_state.draft_extracted_data=extracted_data
+                    for field, widget in [('supplier', 'widget_1647'), ('order_no', 'widget_1650'), ('item_name', 'widget_1651'), ('sku', 'widget_1652')]:
+                        st.session_state[f'new_draft_{st.session_state.draft_epoch}_'+widget]=str(extracted_data.get(field) or '')
         col_b1, col_b2, col_b3 = st.columns(3)
         report_no = col_b1.text_input('Report No.', key='draft_report_no')
-        client_name = col_b2.text_input('Клиент / Заказчик', key=f"new_draft_{st.session_state['draft_epoch']}_" + str('widget_1621'))
-        supplier_name = col_b3.text_input('Фабрика / Поставщик', value=extracted_data.get('supplier', ''), key=f"new_draft_{st.session_state['draft_epoch']}_" + str('widget_1622'))
+        client_name = col_b2.text_input('Клиент / Заказчик', key=f'new_draft_{st.session_state.draft_epoch}_' + str('widget_1646'))
+        supplier_name = col_b3.text_input('Фабрика / Поставщик', value=extracted_data.get('supplier', ''), key=f'new_draft_{st.session_state.draft_epoch}_' + str('widget_1647'))
         col_b4, col_b5, col_b6 = st.columns(3)
-        order_no = col_b4.text_input('PO / Order No.', value=extracted_data.get('order_no', ''), key=f"new_draft_{st.session_state['draft_epoch']}_" + str('widget_1625'))
-        item_name = col_b5.text_input('Наименование товара', value=extracted_data.get('item_name', ''), key=f"new_draft_{st.session_state['draft_epoch']}_" + str('widget_1626'))
-        sku = col_b6.text_input('SKU / Артикул', value=extracted_data.get('sku', ''), key=f"new_draft_{st.session_state['draft_epoch']}_" + str('widget_1627'))
+        order_no = col_b4.text_input('PO / Order No.', value=extracted_data.get('order_no', ''), key=f'new_draft_{st.session_state.draft_epoch}_' + str('widget_1650'))
+        item_name = col_b5.text_input('Наименование товара', value=extracted_data.get('item_name', ''), key=f'new_draft_{st.session_state.draft_epoch}_' + str('widget_1651'))
+        sku = col_b6.text_input('SKU / Артикул', value=extracted_data.get('sku', ''), key=f'new_draft_{st.session_state.draft_epoch}_' + str('widget_1652'))
         inspection_date = st.date_input('Inspection Date / Дата инспекции', value=date.today(), key='draft_inspection_date')
     with st.container(border=True):
         st.markdown('**2. Размерная сетка (Garment Measurement Chart)**')
-        use_spec = st.checkbox('Включить модуль размерной сетки для этой инспекции', value=True, key=f"new_draft_{st.session_state['draft_epoch']}_" + str('widget_1633'))
+        use_spec = st.checkbox('Включить модуль размерной сетки для этой инспекции', value=True, key=f'new_draft_{st.session_state.draft_epoch}_' + str('widget_1658'))
         if use_spec:
             if not st.session_state.reference_spec:
                 st.caption('Загрузите 1 или 2 фото листа спецификации из техпака.')
-                spec_imgs = st.file_uploader('Фото эталонной спецификации (до 2 фото)', type=['jpg', 'png', 'jpeg'], accept_multiple_files=True, key=f"new_draft_{st.session_state['draft_epoch']}_" + str('spec_upload'))
+                spec_imgs = st.file_uploader('Фото эталонной спецификации (до 2 фото)', type=['jpg', 'png', 'jpeg'], accept_multiple_files=True, key=f'new_draft_{st.session_state.draft_epoch}_' + str('spec_upload'))
                 if spec_imgs:
                     if len(spec_imgs) > 2:
                         st.warning('Загружено больше 2 фото. Первые 2 будут взяты в обработку.')
@@ -1639,7 +1660,7 @@ if st.session_state['main_section'] == 'new':
                     for idx, img_file in enumerate(spec_imgs):
                         with cols[idx]:
                             st.image(img_file, caption=f'Фото эталона #{idx + 1}', use_container_width=True)
-                    if st.button('⚡ Оцифровать эталон (объединить фото)', type='primary', use_container_width=True, key=f"new_draft_{st.session_state['draft_epoch']}_" + str('widget_1655')):
+                    if st.button('⚡ Оцифровать эталон (объединить фото)', type='primary', use_container_width=True, key=f'new_draft_{st.session_state.draft_epoch}_' + str('widget_1680')):
                         with st.spinner('Нейросеть считывает и объединяет данные с фото...'):
                             bytes_list = [f.getvalue() for f in spec_imgs]
                             spec = ai_service.digitize_spec_sheet(bytes_list)
@@ -1651,15 +1672,15 @@ if st.session_state['main_section'] == 'new':
             else:
                 spec = st.session_state.reference_spec
                 st.success(f'Эталон загружен. Размеры: {', '.join(spec.get('sizes', []))} ({spec.get('unit', 'cm')})')
-                if st.button('Сбросить эталонную сетку', key=f"new_draft_{st.session_state['draft_epoch']}_" + str('widget_1667')):
+                if st.button('Сбросить эталонную сетку', key=f'new_draft_{st.session_state.draft_epoch}_' + str('widget_1692')):
                     st.session_state.reference_spec = None
                     st.session_state.measured_samples = []
                     st.rerun()
                 s_num = len(st.session_state.measured_samples) + 1
                 st.markdown(f'##### ➕ Замер образца #{s_num}')
-                selected_size = st.selectbox('Размер проверяемого образца', spec.get('sizes', []), key=f"new_draft_{st.session_state['draft_epoch']}_" + str(f'sz_{s_num}'))
+                selected_size = st.selectbox('Размер проверяемого образца', spec.get('sizes', []), key=f'new_draft_{st.session_state.draft_epoch}_' + str(f'sz_{s_num}'))
                 inputs = {}
-                with st.form(key=f"new_draft_{st.session_state['draft_epoch']}_" + str(f'sample_form_{s_num}_{selected_size}'), enter_to_submit=False):
+                with st.form(key=f'new_draft_{st.session_state.draft_epoch}_' + str(f'sample_form_{s_num}_{selected_size}'), enter_to_submit=False):
                     for pom in spec.get('poms', []):
                         p_code = pom.get('code', '')
                         p_desc = pom.get('description', '')
@@ -1670,7 +1691,7 @@ if st.session_state['main_section'] == 'new':
                         c1.write(f'**{p_code}**')
                         tol_txt = f'-{(t_min if t_min is not None else '?')} / +{(t_plus if t_plus is not None else '?')}'
                         c2.write(f'{p_desc} ({tol_txt})')
-                        inputs[p_code] = {'val': c3.text_input(f'Замер {p_code}', placeholder=str(ideal_val) if ideal_val is not None else '', key=f"new_draft_{st.session_state['draft_epoch']}_" + str(f'measurement_{s_num}_{selected_size}_{p_code}'), label_visibility='collapsed'), 'ideal': ideal_val, 'desc': p_desc, 't_min': t_min, 't_plus': t_plus}
+                        inputs[p_code] = {'val': c3.text_input(f'Замер {p_code}', placeholder=str(ideal_val) if ideal_val is not None else '', key=f'new_draft_{st.session_state.draft_epoch}_' + str(f'measurement_{s_num}_{selected_size}_{p_code}'), label_visibility='collapsed'), 'ideal': ideal_val, 'desc': p_desc, 't_min': t_min, 't_plus': t_plus}
                     if st.form_submit_button('✓ Проверить образец'):
                         sample_items = []
                         for code, item_meta in inputs.items():
@@ -1701,7 +1722,7 @@ if st.session_state['main_section'] == 'new':
         sec_names = {'products': 'Продукция (Products)', 'packing': 'Упаковка и маркировка (Packaging)', 'labels': 'Стикеры и штрихкоды (Labels)', 'defects': 'Дефекты (Defects)'}
         for sec_key, sec_title in sec_names.items():
             st.markdown(f'##### {sec_title}')
-            files = st.file_uploader(f"Загрузить фото для секции '{sec_title}'", type=['jpg', 'png', 'jpeg'], accept_multiple_files=True, key=f"new_draft_{st.session_state['draft_epoch']}_" + str(f'f_{sec_key}'), label_visibility='collapsed')
+            files = st.file_uploader(f"Загрузить фото для секции '{sec_title}'", type=['jpg', 'png', 'jpeg'], accept_multiple_files=True, key=f'new_draft_{st.session_state.draft_epoch}_' + str(f'f_{sec_key}'), label_visibility='collapsed')
             if files:
                 preview_cols = st.columns(4)
                 for idx, fl in enumerate(files):
@@ -1711,7 +1732,7 @@ if st.session_state['main_section'] == 'new':
             st.divider()
     with st.container(border=True):
         st.markdown('**4. Комментарии инспектора**')
-        if st.button('✨ Отредактировать комментарии с ИИ', key=f"new_draft_{st.session_state['draft_epoch']}_" + str('btn_ai_comments')):
+        if st.button('✨ Отредактировать комментарии с ИИ', key=f'new_draft_{st.session_state.draft_epoch}_' + str('btn_ai_comments')):
             current_comments = st.session_state.get('comments_val', '')
             if current_comments.strip():
                 with st.spinner('Редактирование текста с сохранением исходного языка...'):
@@ -1723,7 +1744,7 @@ if st.session_state['main_section'] == 'new':
         raw_comments = st.text_area('Комментарии инспектора', key='comments_val', placeholder='Рабочие заметки инспектора...', label_visibility='collapsed')
     with st.container(border=True):
         st.markdown('**5. Заключение инспекции**')
-        if st.button('✨ Отредактировать заключение с ИИ', key=f"new_draft_{st.session_state['draft_epoch']}_" + str('btn_ai_conclusion')):
+        if st.button('✨ Отредактировать заключение с ИИ', key=f'new_draft_{st.session_state.draft_epoch}_' + str('btn_ai_conclusion')):
             current_conclusion = st.session_state.get('conclusion_val', '')
             if current_conclusion.strip():
                 with st.spinner('Редактирование текста с сохранением исходного языка...'):
@@ -1733,8 +1754,8 @@ if st.session_state['main_section'] == 'new':
             else:
                 st.info('Сначала введите заключение.')
         final_comments = st.text_area('Заключение инспекции', key='conclusion_val', placeholder='Итоговое заключение по результатам проверки...', label_visibility='collapsed')
-        result_status = st.selectbox('Финальный результат инспекции', ['PASSED', 'PENDING', 'REJECTED'], index=1, key=f"new_draft_{st.session_state['draft_epoch']}_" + str('widget_1830'))
-    if st.button('🚀 Сформировать и сохранить отчет Excel', type='primary', use_container_width=True, key=f"new_draft_{st.session_state['draft_epoch']}_" + str('widget_1833')):
+        result_status = st.selectbox('Финальный результат инспекции', ['PASSED', 'PENDING', 'REJECTED'], index=1, key=f'new_draft_{st.session_state.draft_epoch}_' + str('widget_1855'))
+    if st.button('🚀 Сформировать и сохранить отчет Excel', type='primary', use_container_width=True, key=f'new_draft_{st.session_state.draft_epoch}_' + str('widget_1858')):
         rep_payload = {'report_no': report_no, 'company_name': st.secrets.get('DEFAULT_COMPANY_NAME', 'BIZNESKIT'), 'client_name': client_name, 'supplier_name': supplier_name, 'order_no': order_no, 'item_name': item_name, 'sku': sku, 'inspector_id': st.session_state.auth_user.email, 'inspection_date': inspection_date.isoformat(), 'result_status': result_status, 'inspector_comments': raw_comments, 'comments': raw_comments, 'conclusion': final_comments, 'measurements': _measurement_snapshot(st.session_state.reference_spec if use_spec else None, st.session_state.measured_samples if use_spec else [])}
         try:
             with st.spinner('Генерация официального Excel-акта в высоком разрешении...'):
@@ -1750,4 +1771,4 @@ if st.session_state['main_section'] == 'new':
         except Exception:
             st.error('Не удалось сформировать Excel-файл. Проверьте фото и данные отчёта.')
     if st.session_state.last_excel_bytes:
-        st.download_button(label='📥 Скачать QC Report (.xlsx)', data=st.session_state.last_excel_bytes, file_name=st.session_state.last_excel_name, mime=EXCEL_MIME, use_container_width=True, key=f"new_draft_{st.session_state['draft_epoch']}_" + str('dl_last_excel'))
+        st.download_button(label='📥 Скачать QC Report (.xlsx)', data=st.session_state.last_excel_bytes, file_name=st.session_state.last_excel_name, mime=EXCEL_MIME, use_container_width=True, key=f'new_draft_{st.session_state.draft_epoch}_' + str('dl_last_excel'))

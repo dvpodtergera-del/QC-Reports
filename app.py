@@ -132,13 +132,11 @@ def _photo_section(ws, row, title, photos):
     c.alignment=Alignment(vertical='center',indent=1)
     ws.row_dimensions[row].height=24
     row += 1
-    width, height = 306, 172
+    width, height = 322, 181
     for base in range(0,len(photos),3):
         ws.row_dimensions[row].height=(height+8)*.75
-        ws.row_dimensions[row+1].height=12
         for slot,left in enumerate((2,5,8)):
             ws.merge_cells(start_row=row,start_column=left,end_row=row,end_column=left+2)
-            ws.merge_cells(start_row=row+1,start_column=left,end_row=row+1,end_column=left+2)
             idx=base+slot
             if idx>=len(photos): continue
             photo=photos[idx]
@@ -148,80 +146,154 @@ def _photo_section(ws, row, title, photos):
                 buf=io.BytesIO();image.save(buf,format='JPEG',quality=94)
             buf.seek(0)
             pic=OpenPyXLImage(buf);pic.width=width;pic.height=height
-            pic.anchor=OneCellAnchor(_from=AnchorMarker(col=left-1,row=row-1,colOff=pixels_to_EMU(12),rowOff=pixels_to_EMU(4)),
+            pic.anchor=OneCellAnchor(_from=AnchorMarker(col=left-1,row=row-1,colOff=pixels_to_EMU(4),rowOff=pixels_to_EMU(4)),
                 ext=XDRPositiveSize2D(pixels_to_EMU(width),pixels_to_EMU(height)))
             ws.add_image(pic)
-            c=ws.cell(row+1,left,photo.get('caption') or f'{title} — {idx+1}')
-            c.font=Font(name='Calibri',size=8,color='64748B')
-            c.alignment=Alignment(horizontal='center',vertical='center',shrink_to_fit=True)
-        row+=2
+            from openpyxl.comments import Comment
+            ws.cell(row,left).comment=Comment(str(photo.get('caption') or f'{title} — {idx+1}'),'QC Inspector')
+        row+=1
     return row
+
 
 
 def _create_measurements_sheet(wb, spec, samples, report_data):
     from openpyxl.utils import get_column_letter
-    ws=wb.create_sheet('Размерная сетка')
-    ws.column_dimensions['A'].width=3
-    for col,width in zip('BCDEFGHI',(12,38,14,14,14,14,14,20)):
-        ws.column_dimensions[col].width=width
-    border=Border(*( [Side(style='thin',color='CBD5E1')]*4 ))
-    row=2
-    def title(text, color='334155'):
-        nonlocal row
-        ws.merge_cells(start_row=row,start_column=2,end_row=row,end_column=9)
-        c=ws.cell(row,2,text);c.fill=PatternFill('solid',fgColor=color)
-        c.font=Font(name='Calibri',size=11,bold=True,color='FFFFFF')
-        c.alignment=Alignment(vertical='center',indent=1,wrap_text=True)
-        ws.row_dimensions[row].height=28;row+=1
-    def cells(values, header=False):
-        nonlocal row
-        for col,value in enumerate(values,2):
-            c=ws.cell(row,col,value);c.border=border
-            c.font=Font(name='Calibri',size=9,bold=header,color='FFFFFF' if header else '0F172A')
-            c.fill=PatternFill('solid',fgColor='475569' if header else ('F8FAFC' if row%2 else 'FFFFFF'))
-            c.alignment=Alignment(horizontal='left' if col==3 else 'center',vertical='center',wrap_text=True)
-        ws.row_dimensions[row].height=30 if header else 28
-        row+=1
-    title(f"РАЗМЕРНАЯ СЕТКА — {report_data.get('report_no','')} — {spec.get('unit','cm')}",'1E293B')
-    poms=spec.get('poms',[])
-    sizes=list(dict.fromkeys(str(size) for size in spec.get('sizes',[])))
-    sizes=sorted(sizes,key=_size_sort_key)
-    title('ЭТАЛОН — оцифрованная спецификация')
-    for offset in range(0,max(1,len(sizes)),4):
-        chunk=sizes[offset:offset+4]
-        cells(['Код','Описание','Допуск −','Допуск +']+chunk+['']*(4-len(chunk)),True)
-        for pom in poms:
-            values=pom.get('specs') or {}
-            cells([pom.get('code',''),pom.get('description',''),_to_number(pom.get('tol_minus')),
-                   _to_number(pom.get('tol_plus'))]+[_to_number(values.get(size)) for size in chunk]+['']*(4-len(chunk)))
-        row+=1
-    title('ПРОВЕРЕННЫЕ ОБРАЗЦЫ')
-    if not samples:
-        title('Проверенные образцы пока отсутствуют','64748B')
-    for size in sorted({str(sample.get('size','')) for sample in samples},key=_size_sort_key):
-        group=[sample for sample in samples if str(sample.get('size',''))==size]
-        title(f'РАЗМЕР {size} — образцов: {len(group)}')
-        for sample in group:
-            items=sample.get('items',[])
-            passed=bool(items) and all(item.get('status')=='PASS' for item in items)
-            title(f"Образец #{sample.get('sample_no','')} — {'В НОРМЕ' if passed else 'ТРЕБУЕТ ВНИМАНИЯ'}",'166534' if passed else '92400E')
-            cells(['Код','Описание','Эталон','Факт','Отклонение','Допуск −','Допуск +','Результат'],True)
-            lookup={str(pom.get('code','')):pom for pom in poms}
-            for item in items:
-                pom=lookup.get(str(item.get('code','')),{})
-                status=item.get('status','NOT_MEASURED')
-                cells([item.get('code',''),item.get('desc') or pom.get('description',''),
-                       _to_number((pom.get('specs') or {}).get(size)),item.get('actual') if item.get('actual') is not None else '—',
-                       item.get('diff') if item.get('diff') is not None else '—',_to_number(pom.get('tol_minus')),
-                       _to_number(pom.get('tol_plus')),MEASURE_STATUS_LABELS.get(status,status)])
-                color,fg=('DCFCE7','166534') if status=='PASS' else ('FEE2E2','991B1B') if status=='FAIL' else ('FEF3C7','92400E')
-                for col in (6,9):
-                    ws.cell(row-1,col).fill=PatternFill('solid',fgColor=color)
-                    ws.cell(row-1,col).font=Font(name='Calibri',size=9,bold=True,color=fg)
-            row+=1
-    _frame_report(ws,row-1,9)
-    ws.freeze_panes='D5'
+    from openpyxl.comments import Comment
+    ws = wb.create_sheet('Размерная сетка')
+    poms = spec.get('poms') or []
+    sizes = sorted({str(x) for x in spec.get('sizes', [])}, key=_size_sort_key)
+    if not sizes:
+        sizes = sorted({str(k) for p in poms for k in (p.get('specs') or {})}, key=_size_sort_key)
+    groups = {size: [x for x in samples if str(x.get('size', '')) == size]
+              for size in sorted({str(x.get('size', '')) for x in samples}, key=_size_sort_key)}
+    right = max(7, 5 + len(sizes), max((5 + 3 * len(g) for g in groups.values()), default=0))
+    if right > 16384:
+        raise ValueError('Слишком много образцов для одного листа Excel.')
+    ws.column_dimensions['A'].width = 3
+    ws.column_dimensions['B'].width = 10
+    ws.column_dimensions['C'].width = 38
+    for col in range(4, right + 1):
+        ws.column_dimensions[get_column_letter(col)].width = 12
+    edge = Side(style='thin', color='CBD5E1')
+    border = Border(left=edge, right=edge, top=edge, bottom=edge)
+    colors = {'PASS': ('DCFCE7', '166534'), 'FAIL': ('FEE2E2', '991B1B')}
+    def put(r, c, value, header=False, status=None):
+        x = ws.cell(r, c, value)
+        x.border = border
+        bg, fg = ('475569', 'FFFFFF') if header else colors.get(status, ('FEF3C7', '92400E') if status else ('F8FAFC' if r % 2 else 'FFFFFF', '0F172A'))
+        x.fill = PatternFill('solid', fgColor=bg)
+        x.font = Font(name='Calibri', size=10, bold=header or status is not None, color=fg)
+        x.alignment = Alignment(horizontal='left' if c == 3 else 'center', vertical='center',
+                                textRotation=0, wrap_text=not header, shrink_to_fit=header)
+        if isinstance(value, (float, int)):
+            x.number_format = '0.##'
+        return x
+    def band(r, text, end=right, color='334155'):
+        ws.merge_cells(start_row=r, start_column=2, end_row=r, end_column=end)
+        x = ws.cell(r, 2, text)
+        x.font = Font(name='Calibri', size=11, bold=True, color='FFFFFF')
+        x.fill = PatternFill('solid', fgColor=color)
+        x.alignment = Alignment(vertical='center', indent=1, textRotation=0, shrink_to_fit=True)
+        ws.row_dimensions[r].height = 28
+    band(2, f"РАЗМЕРНАЯ СЕТКА — {report_data.get('report_no', '')} — {spec.get('unit', 'cm')}", color='1E293B')
+    band(4, 'ЭТАЛОН — оцифрованная спецификация', end=max(7, 5 + len(sizes)))
+    for c, value in enumerate(['Код', 'Описание', 'Допуск −', 'Допуск +'] + sizes, 2):
+        put(5, c, value, True)
+    ws.row_dimensions[5].height = 28
+    row = 6
+    for pom in poms:
+        refs = {str(k): v for k, v in (pom.get('specs') or {}).items()}
+        values = [pom.get('code', ''), pom.get('description', ''), _to_number(pom.get('tol_minus')), _to_number(pom.get('tol_plus'))] + [_to_number(refs.get(size)) for size in sizes]
+        for c, value in enumerate(values, 2):
+            put(row, c, value)
+        ws.row_dimensions[row].height = 28
+        row += 1
+    row += 2
+    band(row, 'ПРОВЕРЕННЫЕ ОБРАЗЦЫ')
+    row += 2
+    if not groups:
+        band(row, 'Проверенные образцы пока отсутствуют', color='64748B')
+        row += 1
+    for size, group in groups.items():
+        end = 5 + 3 * len(group)
+        band(row, f'РАЗМЕР {size} — образцов проверено: {len(group)}', end=end)
+        row += 1
+        for c, label in enumerate(['Код', 'Описание', 'Допуск −', 'Допуск +'], 2):
+            put(row, c, label, True)
+            put(row + 1, c, '', True)
+        for i, sample in enumerate(group):
+            col = 6 + i * 3
+            ws.merge_cells(start_row=row, start_column=col, end_row=row, end_column=col + 2)
+            put(row, col, f"Образец #{sample.get('sample_no', '')}", True)
+            for off, label in enumerate(['Эталон', 'Факт', 'Δ']):
+                put(row + 1, col + off, label, True)
+        ws.row_dimensions[row].height = 28
+        ws.row_dimensions[row + 1].height = 26
+        row += 2
+        pom_map = {str(p.get('code', '')): p for p in poms}
+        codes = list(pom_map)
+        maps = [{str(it.get('code', '')): it for it in sample.get('items', [])} for sample in group]
+        for items in maps:
+            for code in items:
+                if code not in codes:
+                    codes.append(code)
+        for code in codes:
+            pom = pom_map.get(code, {})
+            desc = pom.get('description') or next((m[code].get('desc', '') for m in maps if code in m), '')
+            refs = {str(k): v for k, v in (pom.get('specs') or {}).items()}
+            for c, value in enumerate([code, desc, _to_number(pom.get('tol_minus')), _to_number(pom.get('tol_plus'))], 2):
+                put(row, c, value)
+            for i, items in enumerate(maps):
+                item = items.get(code, {})
+                status = item.get('status', 'NOT_MEASURED')
+                col = 6 + i * 3
+                values = [_to_number(refs.get(size)), item.get('actual') if item.get('actual') is not None else '—', item.get('diff') if item.get('diff') is not None else '—']
+                for off, value in enumerate(values):
+                    put(row, col + off, value, status=status if off else None)
+                ws.cell(row, col + 2).comment = Comment(MEASURE_STATUS_LABELS.get(status, status), 'QC Inspector')
+            ws.row_dimensions[row].height = 28
+            row += 1
+        good, bad, incomplete, detail = [], [], [], []
+        for sample, items in zip(group, maps):
+            number = sample.get('sample_no', '?')
+            failed = [code for code in codes if items.get(code, {}).get('status') == 'FAIL']
+            if failed:
+                bad.append(number)
+                parts = []
+                for code in failed:
+                    delta = items[code].get('diff')
+                    parts.append(f'{code} ({delta:+g})' if isinstance(delta, (int, float)) else code)
+                detail.append(f"Образец #{number}: " + ', '.join(parts))
+            elif codes and all(items.get(code, {}).get('status') == 'PASS' for code in codes):
+                good.append(number)
+            else:
+                incomplete.append(number)
+        row += 1
+        band(row, f'СТАТИСТИКА ПО РАЗМЕРУ {size}', end=end, color='475569')
+        row += 1
+        summary = [f'Проверено: {len(group)} · В допуске: {len(good)} · Вне допуска: {len(bad)} · Неполные/ошибочные данные: {len(incomplete)}',
+                   'Образцы с расхождениями: ' + (', '.join('#' + str(n) for n in bad) or 'нет')] + detail
+        if incomplete:
+            summary.append('Нужны данные/исправления: ' + ', '.join('#' + str(n) for n in incomplete))
+        for text in summary:
+            ws.merge_cells(start_row=row, start_column=2, end_row=row, end_column=end)
+            x = ws.cell(row, 2, text)
+            x.font = Font(name='Calibri', size=10, color='334155')
+            x.alignment = Alignment(vertical='center', wrap_text=True, textRotation=0, indent=1)
+            ws.row_dimensions[row].height = max(26, 18 * (len(text) // max(70, end * 10) + 1))
+            row += 1
+        row += 2
+    ws.sheet_view.showGridLines = False
+    ws.sheet_view.zoomScale = 90
+    ws.freeze_panes = 'F6'
+    ws.print_area = f'B2:{get_column_letter(right)}{row - 1}'
+    ws.sheet_properties.pageSetUpPr.fitToPage = False
+    ws.page_setup.orientation = 'landscape'
+    ws.page_setup.scale = 100
+    ws.page_setup.fitToWidth = 0
+    ws.page_setup.fitToHeight = 0
     return ws
+
 
 def create_full_qc_report(
     report_data: dict, 

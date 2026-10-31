@@ -246,9 +246,7 @@ def _create_measurements_sheet(wb,spec,samples,report_data):
             else:incomplete.append(num)
         row+=1;band(row,f'СТАТИСТИКА ПО РАЗМЕРУ {size}',end=end,color='475569');row+=1
         summary=[f'Проверено: {len(group)} · В допуске: {len(good)} · Вне допуска: {len(bad)}',
-                 'Образцы с расхождениями: '+(', '.join('#'+str(num) for num in bad) or 'нет'),
-                 'Критические измерения (выходы за допуск): '+str(sum(items.get(code,{}).get('status')=='FAIL' for items in maps for code in codes))]
-        summary+=details
+                 'Образцы с расхождениями: '+(', '.join('#'+str(num) for num in bad) or 'нет')]
         if incomplete:summary.append('Не завершена оценка: '+', '.join('#'+str(num) for num in incomplete))
         for text in summary:
             ws.merge_cells(start_row=row,start_column=2,end_row=row,end_column=end)

@@ -123,175 +123,146 @@ def _frame_report(ws, last_row, right=10):
 
 
 def _photo_section(ws, row, title, photos):
-    from openpyxl.drawing.spreadsheet_drawing import OneCellAnchor, AnchorMarker
-    from openpyxl.drawing.xdr import XDRPositiveSize2D
+    from openpyxl.drawing.spreadsheet_drawing import TwoCellAnchor, AnchorMarker
     from openpyxl.utils.units import pixels_to_EMU
-    ws.merge_cells(start_row=row, start_column=2, end_row=row, end_column=10)
-    c = ws.cell(row,2,title); c.fill=PatternFill('solid',fgColor='334155')
+    from openpyxl.utils import get_column_letter
+    ws.merge_cells(start_row=row,start_column=2,end_row=row,end_column=10)
+    c=ws.cell(row,2,title)
+    c.fill=PatternFill('solid',fgColor='334155')
     c.font=Font(name='Calibri',size=10,bold=True,color='FFFFFF')
     c.alignment=Alignment(vertical='center',indent=1)
     ws.row_dimensions[row].height=24
-    row += 1
-    width, height = 322, 181
-    for base in range(0,len(photos),3):
-        ws.row_dimensions[row].height=(height+8)*.75
-        for slot,left in enumerate((2,5,8)):
-            ws.merge_cells(start_row=row,start_column=left,end_row=row,end_column=left+2)
+    row+=1
+    gap=8
+    slots=((2,4),(5,7),(8,10))
+    widths=[sum(int((ws.column_dimensions[get_column_letter(c)].width or 15)*7+.5)+5 for c in range(left,right+1)) for left,right in slots]
+    height=round((min(widths)-gap)*9/16)
+    batches=(len(photos)+2)//3
+    for batch,base in enumerate(range(0,len(photos),3)):
+        bottom_gap=gap if batch<batches-1 else 0
+        ws.row_dimensions[row].height=(height+bottom_gap)*.75
+        for slot,(left,right) in enumerate(slots):
+            ws.merge_cells(start_row=row,start_column=left,end_row=row,end_column=right)
             idx=base+slot
-            if idx>=len(photos): continue
-            photo=photos[idx]
-            with Image.open(io.BytesIO(photo['bytes'])) as source:
+            if idx>=len(photos):continue
+            left_inset=0 if slot==0 else gap//2
+            right_inset=0 if slot==2 else gap//2
+            width=widths[slot]-left_inset-right_inset
+            with Image.open(io.BytesIO(photos[idx]['bytes'])) as source:
                 image=ImageOps.exif_transpose(source).convert('RGB')
                 image=ImageOps.fit(image,(width*4,height*4),method=Image.Resampling.LANCZOS,centering=(.5,.5))
-                buf=io.BytesIO();image.save(buf,format='JPEG',quality=94)
-            buf.seek(0)
-            pic=OpenPyXLImage(buf);pic.width=width;pic.height=height
-            pic.anchor=OneCellAnchor(_from=AnchorMarker(col=left-1,row=row-1,colOff=pixels_to_EMU(4),rowOff=pixels_to_EMU(4)),
-                ext=XDRPositiveSize2D(pixels_to_EMU(width),pixels_to_EMU(height)))
-            ws.add_image(pic)
-            from openpyxl.comments import Comment
-            ws.cell(row,left).comment=Comment(str(photo.get('caption') or f'{title} — {idx+1}'),'QC Inspector')
+                buffer=io.BytesIO();image.save(buffer,format='JPEG',quality=94)
+            buffer.seek(0)
+            picture=OpenPyXLImage(buffer)
+            picture.anchor=TwoCellAnchor(editAs='oneCell',
+                _from=AnchorMarker(col=left-1,row=row-1,colOff=pixels_to_EMU(left_inset),rowOff=0),
+                to=AnchorMarker(col=right,row=row,colOff=-pixels_to_EMU(right_inset),rowOff=-pixels_to_EMU(bottom_gap)))
+            ws.add_image(picture)
         row+=1
     return row
 
 
 
-def _create_measurements_sheet(wb, spec, samples, report_data):
+def _create_measurements_sheet(wb,spec,samples,report_data):
     from openpyxl.utils import get_column_letter
-    from openpyxl.comments import Comment
-    ws = wb.create_sheet('Размерная сетка')
-    poms = spec.get('poms') or []
-    sizes = sorted({str(x) for x in spec.get('sizes', [])}, key=_size_sort_key)
-    if not sizes:
-        sizes = sorted({str(k) for p in poms for k in (p.get('specs') or {})}, key=_size_sort_key)
-    groups = {size: [x for x in samples if str(x.get('size', '')) == size]
-              for size in sorted({str(x.get('size', '')) for x in samples}, key=_size_sort_key)}
-    right = max(7, 5 + len(sizes), max((5 + 3 * len(g) for g in groups.values()), default=0))
-    if right > 16384:
-        raise ValueError('Слишком много образцов для одного листа Excel.')
-    ws.column_dimensions['A'].width = 3
-    ws.column_dimensions['B'].width = 10
-    ws.column_dimensions['C'].width = 38
-    for col in range(4, right + 1):
-        ws.column_dimensions[get_column_letter(col)].width = 12
-    edge = Side(style='thin', color='CBD5E1')
-    border = Border(left=edge, right=edge, top=edge, bottom=edge)
-    colors = {'PASS': ('DCFCE7', '166534'), 'FAIL': ('FEE2E2', '991B1B')}
-    def put(r, c, value, header=False, status=None):
-        x = ws.cell(r, c, value)
-        x.border = border
-        bg, fg = ('475569', 'FFFFFF') if header else colors.get(status, ('FEF3C7', '92400E') if status else ('F8FAFC' if r % 2 else 'FFFFFF', '0F172A'))
-        x.fill = PatternFill('solid', fgColor=bg)
-        x.font = Font(name='Calibri', size=10, bold=header or status is not None, color=fg)
-        x.alignment = Alignment(horizontal='left' if c == 3 else 'center', vertical='center',
-                                textRotation=0, wrap_text=not header, shrink_to_fit=header)
-        if isinstance(value, (float, int)):
-            x.number_format = '0.##'
+    ws=wb.create_sheet('Размерная сетка')
+    poms=spec.get('poms') or []
+    sizes=sorted({str(x) for x in spec.get('sizes',[])},key=_size_sort_key)
+    if not sizes:sizes=sorted({str(k) for p in poms for k in (p.get('specs') or {})},key=_size_sort_key)
+    groups={size:[x for x in samples if str(x.get('size',''))==size] for size in sorted({str(x.get('size','')) for x in samples},key=_size_sort_key)}
+    right=max(8,5+len(sizes),max((6+3*len(group) for group in groups.values()),default=0))
+    if right>16384:raise ValueError('Слишком много образцов для одного листа Excel.')
+    ws.column_dimensions['A'].width=3
+    ws.column_dimensions['B'].width=11
+    ws.column_dimensions['C'].width=42
+    for col in range(4,right+1):ws.column_dimensions[get_column_letter(col)].width=15
+    thin=Side(style='thin',color='CBD5E1')
+    border=Border(left=thin,right=thin,top=thin,bottom=thin)
+    colors={'PASS':('DCFCE7','166534'),'FAIL':('FEE2E2','991B1B')}
+    def put(r,c,value,header=False,status=None):
+        x=ws.cell(r,c,value);x.border=border
+        bg,fg=('475569','FFFFFF') if header else colors.get(status,('FEF3C7','92400E') if status else ('F8FAFC' if r%2 else 'FFFFFF','0F172A'))
+        x.fill=PatternFill('solid',fgColor=bg)
+        x.font=Font(name='Calibri',size=13,bold=header or status is not None,color=fg)
+        x.alignment=Alignment(horizontal='left' if c==3 else 'center',vertical='center',textRotation=0,wrap_text=not header)
+        if isinstance(value,(int,float)):x.number_format='0.##'
         return x
-    def band(r, text, end=right, color='334155'):
-        ws.merge_cells(start_row=r, start_column=2, end_row=r, end_column=end)
-        x = ws.cell(r, 2, text)
-        x.font = Font(name='Calibri', size=11, bold=True, color='FFFFFF')
-        x.fill = PatternFill('solid', fgColor=color)
-        x.alignment = Alignment(vertical='center', indent=1, textRotation=0, shrink_to_fit=True)
-        ws.row_dimensions[r].height = 28
-    band(2, f"РАЗМЕРНАЯ СЕТКА — {report_data.get('report_no', '')} — {spec.get('unit', 'cm')}", color='1E293B')
-    band(4, 'ЭТАЛОН — оцифрованная спецификация', end=max(7, 5 + len(sizes)))
-    for c, value in enumerate(['Код', 'Описание', 'Допуск −', 'Допуск +'] + sizes, 2):
-        put(5, c, value, True)
-    ws.row_dimensions[5].height = 28
-    row = 6
+    def band(r,text,end=right,color='334155'):
+        ws.merge_cells(start_row=r,start_column=2,end_row=r,end_column=end)
+        x=ws.cell(r,2,text);x.font=Font(name='Calibri',size=14.3,bold=True,color='FFFFFF')
+        x.fill=PatternFill('solid',fgColor=color)
+        x.alignment=Alignment(vertical='center',indent=1,textRotation=0,wrap_text=True)
+        ws.row_dimensions[r].height=38
+    band(2,f"РАЗМЕРНАЯ СЕТКА — {report_data.get('report_no','')} — {spec.get('unit','cm')}",color='1E293B')
+    band(4,'ЭТАЛОН — оцифрованная спецификация',end=max(8,5+len(sizes)))
+    for c,value in enumerate(['Код','Описание','Допуск −','Допуск +']+sizes,2):put(5,c,value,True)
+    ws.row_dimensions[5].height=36
+    row=6
     for pom in poms:
-        refs = {str(k): v for k, v in (pom.get('specs') or {}).items()}
-        values = [pom.get('code', ''), pom.get('description', ''), _to_number(pom.get('tol_minus')), _to_number(pom.get('tol_plus'))] + [_to_number(refs.get(size)) for size in sizes]
-        for c, value in enumerate(values, 2):
-            put(row, c, value)
-        ws.row_dimensions[row].height = 28
-        row += 1
-    row += 2
-    band(row, 'ПРОВЕРЕННЫЕ ОБРАЗЦЫ')
-    row += 2
-    if not groups:
-        band(row, 'Проверенные образцы пока отсутствуют', color='64748B')
-        row += 1
-    for size, group in groups.items():
-        end = 5 + 3 * len(group)
-        band(row, f'РАЗМЕР {size} — образцов проверено: {len(group)}', end=end)
-        row += 1
-        for c, label in enumerate(['Код', 'Описание', 'Допуск −', 'Допуск +'], 2):
-            put(row, c, label, True)
-            put(row + 1, c, '', True)
-        for i, sample in enumerate(group):
-            col = 6 + i * 3
-            ws.merge_cells(start_row=row, start_column=col, end_row=row, end_column=col + 2)
-            put(row, col, f"Образец #{sample.get('sample_no', '')}", True)
-            for off, label in enumerate(['Эталон', 'Факт', 'Δ']):
-                put(row + 1, col + off, label, True)
-        ws.row_dimensions[row].height = 28
-        ws.row_dimensions[row + 1].height = 26
-        row += 2
-        pom_map = {str(p.get('code', '')): p for p in poms}
-        codes = list(pom_map)
-        maps = [{str(it.get('code', '')): it for it in sample.get('items', [])} for sample in group]
+        refs={str(k):v for k,v in (pom.get('specs') or {}).items()}
+        for c,value in enumerate([pom.get('code',''),pom.get('description',''),_to_number(pom.get('tol_minus')),_to_number(pom.get('tol_plus'))]+[_to_number(refs.get(size)) for size in sizes],2):put(row,c,value)
+        ws.row_dimensions[row].height=38;row+=1
+    row+=2;band(row,'ПРОВЕРЕННЫЕ ОБРАЗЦЫ');row+=2
+    if not groups:band(row,'Проверенные образцы пока отсутствуют',color='64748B');row+=1
+    for size,group in groups.items():
+        end=6+3*len(group)
+        band(row,f'РАЗМЕР {size} — образцов проверено: {len(group)}',end=end);row+=1
+        for c,label in enumerate(['Код','Описание','Критических','Допуск −','Допуск +'],2):
+            put(row,c,label,True);put(row+1,c,'',True)
+        for idx,sample in enumerate(group):
+            col=7+idx*3
+            ws.merge_cells(start_row=row,start_column=col,end_row=row,end_column=col+2)
+            put(row,col,f"Образец #{sample.get('sample_no','')}",True)
+            for off,label in enumerate(['Эталон','Факт','Δ']):put(row+1,col+off,label,True)
+        ws.row_dimensions[row].height=36;ws.row_dimensions[row+1].height=34;row+=2
+        pom_map={str(p.get('code','')):p for p in poms};codes=list(pom_map)
+        maps=[{str(item.get('code','')):item for item in sample.get('items',[])} for sample in group]
         for items in maps:
             for code in items:
-                if code not in codes:
-                    codes.append(code)
+                if code not in codes:codes.append(code)
         for code in codes:
-            pom = pom_map.get(code, {})
-            desc = pom.get('description') or next((m[code].get('desc', '') for m in maps if code in m), '')
-            refs = {str(k): v for k, v in (pom.get('specs') or {}).items()}
-            for c, value in enumerate([code, desc, _to_number(pom.get('tol_minus')), _to_number(pom.get('tol_plus'))], 2):
-                put(row, c, value)
-            for i, items in enumerate(maps):
-                item = items.get(code, {})
-                status = item.get('status', 'NOT_MEASURED')
-                col = 6 + i * 3
-                values = [_to_number(refs.get(size)), item.get('actual') if item.get('actual') is not None else '—', item.get('diff') if item.get('diff') is not None else '—']
-                for off, value in enumerate(values):
-                    put(row, col + off, value, status=status if off else None)
-                ws.cell(row, col + 2).comment = Comment(MEASURE_STATUS_LABELS.get(status, status), 'QC Inspector')
-            ws.row_dimensions[row].height = 28
-            row += 1
-        good, bad, incomplete, detail = [], [], [], []
-        for sample, items in zip(group, maps):
-            number = sample.get('sample_no', '?')
-            failed = [code for code in codes if items.get(code, {}).get('status') == 'FAIL']
+            pom=pom_map.get(code,{})
+            desc=pom.get('description') or next((items[code].get('desc','') for items in maps if code in items),'')
+            critical=sum(items.get(code,{}).get('status')=='FAIL' for items in maps)
+            refs={str(k):v for k,v in (pom.get('specs') or {}).items()}
+            for c,value in enumerate([code,desc,critical,_to_number(pom.get('tol_minus')),_to_number(pom.get('tol_plus'))],2):put(row,c,value,status='FAIL' if c==4 and critical else None)
+            for idx,items in enumerate(maps):
+                item=items.get(code,{});status=item.get('status','NOT_MEASURED');col=7+idx*3
+                for off,value in enumerate([_to_number(refs.get(size)),item.get('actual') if item.get('actual') is not None else '—',item.get('diff') if item.get('diff') is not None else '—']):put(row,col+off,value,status=status if off else None)
+            ws.row_dimensions[row].height=max(38,20*((len(str(desc))//38)+1));row+=1
+        good,bad,incomplete,details=[],[],[],[]
+        for sample,items in zip(group,maps):
+            num=sample.get('sample_no','?')
+            failed=[code for code in codes if items.get(code,{}).get('status')=='FAIL']
             if failed:
-                bad.append(number)
-                parts = []
+                bad.append(num)
                 for code in failed:
-                    delta = items[code].get('diff')
-                    parts.append(f'{code} ({delta:+g})' if isinstance(delta, (int, float)) else code)
-                detail.append(f"Образец #{number}: " + ', '.join(parts))
-            elif codes and all(items.get(code, {}).get('status') == 'PASS' for code in codes):
-                good.append(number)
-            else:
-                incomplete.append(number)
-        row += 1
-        band(row, f'СТАТИСТИКА ПО РАЗМЕРУ {size}', end=end, color='475569')
-        row += 1
-        summary = [f'Проверено: {len(group)} · В допуске: {len(good)} · Вне допуска: {len(bad)} · Неполные/ошибочные данные: {len(incomplete)}',
-                   'Образцы с расхождениями: ' + (', '.join('#' + str(n) for n in bad) or 'нет')] + detail
-        if incomplete:
-            summary.append('Нужны данные/исправления: ' + ', '.join('#' + str(n) for n in incomplete))
+                    item=items[code];pom=pom_map.get(code,{})
+                    refs={str(k):v for k,v in (pom.get('specs') or {}).items()}
+                    delta=item.get('diff');delta_text=f'{delta:+g}' if isinstance(delta,(float,int)) else str(delta)
+                    description=pom.get('description') or item.get('desc','')
+                    details.append(f"#{num} · {code} {description}: факт {item.get('actual','—')}; эталон {refs.get(size,'—')}; Δ {delta_text}; допуск −{pom.get('tol_minus','?')} / +{pom.get('tol_plus','?')}")
+            elif codes and all(items.get(code,{}).get('status')=='PASS' for code in codes):good.append(num)
+            else:incomplete.append(num)
+        row+=1;band(row,f'СТАТИСТИКА ПО РАЗМЕРУ {size}',end=end,color='475569');row+=1
+        summary=[f'Проверено: {len(group)} · В допуске: {len(good)} · Вне допуска: {len(bad)}',
+                 'Образцы с расхождениями: '+(', '.join('#'+str(num) for num in bad) or 'нет'),
+                 'Критические измерения (выходы за допуск): '+str(sum(items.get(code,{}).get('status')=='FAIL' for items in maps for code in codes))]
+        summary+=details
+        if incomplete:summary.append('Не завершена оценка: '+', '.join('#'+str(num) for num in incomplete))
         for text in summary:
-            ws.merge_cells(start_row=row, start_column=2, end_row=row, end_column=end)
-            x = ws.cell(row, 2, text)
-            x.font = Font(name='Calibri', size=10, color='334155')
-            x.alignment = Alignment(vertical='center', wrap_text=True, textRotation=0, indent=1)
-            ws.row_dimensions[row].height = max(26, 18 * (len(text) // max(70, end * 10) + 1))
-            row += 1
-        row += 2
-    ws.sheet_view.showGridLines = False
-    ws.sheet_view.zoomScale = 90
-    ws.freeze_panes = 'F6'
-    ws.print_area = f'B2:{get_column_letter(right)}{row - 1}'
-    ws.sheet_properties.pageSetUpPr.fitToPage = False
-    ws.page_setup.orientation = 'landscape'
-    ws.page_setup.scale = 100
-    ws.page_setup.fitToWidth = 0
-    ws.page_setup.fitToHeight = 0
+            ws.merge_cells(start_row=row,start_column=2,end_row=row,end_column=end)
+            x=ws.cell(row,2,text);x.font=Font(name='Calibri',size=13,color='334155')
+            x.alignment=Alignment(vertical='center',wrap_text=True,textRotation=0,indent=1)
+            ws.row_dimensions[row].height=max(34,22*(len(text)//max(70,end*9)+1));row+=1
+        row+=2
+    ws.freeze_panes='G6'
+    ws.sheet_view.showGridLines=False
+    ws.sheet_view.zoomScale=100
+    ws.print_area=f'B2:{get_column_letter(right)}{row-1}'
+    ws.sheet_properties.pageSetUpPr.fitToPage=False
+    ws.page_setup.orientation='landscape';ws.page_setup.scale=100
+    ws.page_setup.fitToWidth=0;ws.page_setup.fitToHeight=0
     return ws
 
 
@@ -459,6 +430,10 @@ def create_full_qc_report(
             ws.merge_cells(start_row=top, end_row=bottom, start_column=left, end_column=10)
     _frame_report(ws, curr_row)
     out = io.BytesIO()
+    for sheet in wb.worksheets:
+        for cells in sheet:
+            for cell in cells:
+                if cell.comment is not None: cell.comment = None
     wb.save(out)
     return out.getvalue()
 
@@ -727,6 +702,10 @@ def append_photos_to_existing_excel(excel_bytes: bytes, new_photos: list[tuple[s
 
     _frame_report(ws, row)
     output = io.BytesIO()
+    for sheet in wb.worksheets:
+        for cells in sheet:
+            for cell in cells:
+                if cell.comment is not None: cell.comment = None
     wb.save(output)
     wb.close()
     return output.getvalue()

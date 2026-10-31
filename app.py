@@ -932,6 +932,158 @@ if(host&&window.frameElement){{const frame=window.frameElement;const observer=ne
     components.html(html, height=initial_height, scrolling=False)
 
 
+
+def _measurement_snapshot(spec, samples):
+    import copy
+    return {'schema_version': 1, 'reference_spec': copy.deepcopy(spec),
+            'measured_samples': copy.deepcopy(samples or [])}
+
+
+def _measurement_state(report_data):
+    import copy
+    data = report_data.get('measurements') or {}
+    return copy.deepcopy(data.get('reference_spec')), copy.deepcopy(data.get('measured_samples') or [])
+
+
+def _render_measurement_view(spec, samples, prefix):
+    import pandas as pd
+    st.markdown('### Размерная сетка')
+    if not spec:
+        st.info('Размерная сетка не добавлена. Её можно загрузить при редактировании отчёта.')
+        return
+    poms = spec.get('poms') or []
+    sizes = sorted({str(x) for x in spec.get('sizes', [])}, key=_size_sort_key)
+    with st.expander('Эталонная размерная сетка', expanded=not bool(samples)):
+        rows = []
+        for pom in poms:
+            refs = {str(k): v for k,v in (pom.get('specs') or {}).items()}
+            rows.append({'Код': pom.get('code',''), 'Описание': pom.get('description',''),
+                         'Допуск −': pom.get('tol_minus'), 'Допуск +': pom.get('tol_plus'),
+                         **{size: refs.get(size) for size in sizes}})
+        st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+    if not samples:
+        st.caption('Проверенные образцы пока не добавлены.')
+        return
+    measured_sizes = sorted({str(x.get('size','')) for x in samples}, key=_size_sort_key)
+    chosen = st.selectbox('Размер', measured_sizes, key=prefix+'_view_size')
+    group = [x for x in samples if str(x.get('size','')) == chosen]
+    pmap = {str(p.get('code','')): p for p in poms}
+    codes = list(pmap)
+    for sample in group:
+        for item in sample.get('items',[]):
+            code = str(item.get('code',''))
+            if code not in codes: codes.append(code)
+    maps = [{str(it.get('code','')):it for it in sample.get('items',[])} for sample in group]
+    bad = [sample.get('sample_no') for sample, items in zip(group,maps)
+           if any(it.get('status')=='FAIL' for it in items.values())]
+    passed = sum(bool(codes) and all(items.get(code,{}).get('status')=='PASS' for code in codes) for items in maps)
+    st.caption(f'Проверено: {len(group)} · В допуске: {passed} · Вне допуска: {len(bad)}')
+    st.write('Образцы с расхождениями: '+(', '.join('#'+str(n) for n in bad) or 'нет'))
+    labels = ['Все образцы'] + [f"Образец #{sample.get('sample_no')}" for sample in group]
+    selection = st.selectbox('Показать результаты', list(range(len(labels))),
+                             format_func=lambda i: labels[i], key=prefix+'_view_sample')
+    only_fail = st.checkbox('Только вне допуска', key=prefix+'_only_fail')
+    selected = list(zip(group,maps)) if selection==0 else [(group[selection-1], maps[selection-1])]
+    rows=[]
+    for code in codes:
+        pom=pmap.get(code,{})
+        fail_count=sum(items.get(code,{}).get('status')=='FAIL' for items in maps)
+        if only_fail and not any(items.get(code,{}).get('status')=='FAIL' for _,items in selected): continue
+        refs={str(k):v for k,v in (pom.get('specs') or {}).items()}
+        record={'Код':code, 'Описание':pom.get('description') or next((items[code].get('desc','') for items in maps if code in items),''),
+                'Критических': fail_count, 'Эталон':refs.get(chosen), 'Допуск −':pom.get('tol_minus'), 'Допуск +':pom.get('tol_plus')}
+        for sample,items in selected:
+            item=items.get(code,{})
+            label=f"#{sample.get('sample_no')}"
+            record[label+' Факт']=item.get('actual')
+            record[label+' Δ']=item.get('diff')
+            record[label+' Результат']=MEASURE_STATUS_LABELS.get(item.get('status','NOT_MEASURED'),'—')
+        rows.append(record)
+    if rows:st.dataframe(pd.DataFrame(rows),hide_index=True,use_container_width=True)
+    else:st.caption('В выбранных образцах нет выходов за допуск.')
+
+
+def _edit_measurements(report_id, report_data):
+    import copy
+    key='measurement_draft_'+str(report_id)
+    if key not in st.session_state:
+        spec,samples=_measurement_state(report_data)
+        st.session_state[key]={'spec':spec,'samples':samples,'version':0}
+    draft=st.session_state[key]
+    prefix='measurement_edit_'+str(report_id)+'_'+str(draft['version'])
+    with st.expander('Размерная сетка — добавить или изменить',expanded=True):
+        st.caption('Изменения замеров попадут в отчёт и Excel после нажатия «Сохранить изменения» ниже.')
+        uploads=st.file_uploader('Эталонная сетка — до двух фотографий',type=['jpg','jpeg','png'],
+                                 accept_multiple_files=True,key=prefix+'_upload')
+        if st.button('Оцифровать и загрузить эталон',key=prefix+'_digitize',disabled=not bool(uploads)):
+            if len(uploads)>2:st.error('Загрузите не больше двух фотографий.')
+            else:
+                with st.spinner('Распознавание размерной сетки…'):
+                    spec=ai_service.digitize_spec_sheet([file.getvalue() for file in uploads])
+                if spec and spec.get('poms') and spec.get('sizes'):
+                    if draft['samples']:
+                        st.session_state[prefix+'_pending_spec']=spec
+                    else:
+                        draft['spec']=spec;draft['version']+=1;st.rerun()
+                else:st.error('Не удалось распознать размеры и точки замеров.')
+        pending=st.session_state.get(prefix+'_pending_spec')
+        if pending:
+            st.warning('Замена эталона удалит замеры в этом черновике: они относятся к прежней сетке.')
+            yes,no=st.columns(2)
+            if yes.button('Заменить и очистить замеры',key=prefix+'_replace'):
+                draft['spec']=pending;draft['samples']=[];draft['version']+=1;st.rerun()
+            if no.button('Не заменять',key=prefix+'_keep'):
+                st.session_state.pop(prefix+'_pending_spec',None);st.rerun()
+        spec=draft['spec']
+        if spec:
+            st.success('Эталон загружен: '+', '.join(str(x) for x in spec.get('sizes',[])))
+            sample_options=[None]+list(range(len(draft['samples'])))
+            selected=st.selectbox('Образец для редактирования',sample_options,
+                format_func=lambda i:'Добавить новый образец' if i is None else f"Образец #{draft['samples'][i].get('sample_no')} · {draft['samples'][i].get('size')}",
+                key=prefix+'_sample')
+            current=draft['samples'][selected] if selected is not None else None
+            sizes=[str(x) for x in spec.get('sizes',[])]
+            selected_size=st.selectbox('Размер образца',sizes,
+                index=sizes.index(str(current.get('size'))) if current and str(current.get('size')) in sizes else 0,
+                key=prefix+'_size_'+str(selected))
+            current_items={str(it.get('code','')):it for it in current.get('items',[])} if current and str(current.get('size'))==selected_size else {}
+            with st.form(prefix+'_form_'+str(selected)+'_'+selected_size,enter_to_submit=False):
+                values=[]
+                for idx,pom in enumerate(spec.get('poms',[])):
+                    code=str(pom.get('code',''));ideal=(pom.get('specs') or {}).get(selected_size)
+                    actual=current_items.get(code,{}).get('actual')
+                    left,right=st.columns([3,2])
+                    left.write(f"{code} · {pom.get('description','')} (−{pom.get('tol_minus','?')} / +{pom.get('tol_plus','?')})")
+                    raw=right.text_input('Замер '+code,value=str(actual) if actual is not None else '',
+                        placeholder=str(ideal) if ideal is not None else '',key=prefix+'_value_'+str(selected)+'_'+selected_size+'_'+str(idx),label_visibility='collapsed')
+                    values.append((pom,raw,ideal))
+                apply=st.form_submit_button('✓ Проверить образец',type='primary')
+            if apply:
+                items=[]
+                for pom,raw,ideal in values:
+                    ref=_to_number(ideal);confirmed=not raw.strip() and ref is not None
+                    res=evaluate_measurement(ref if confirmed else raw,ideal,pom.get('tol_minus'),pom.get('tol_plus'))
+                    items.append({'code':str(pom.get('code','')),'desc':pom.get('description',''),
+                                  'input_source':'confirmed_reference' if confirmed else 'manual',**res})
+                sample={'sample_no':current.get('sample_no') if current else max([int(x.get('sample_no',0)) for x in draft['samples']]+[0])+1,
+                        'size':selected_size,'items':items}
+                if selected is None:draft['samples'].append(sample)
+                else:draft['samples'][selected]=sample
+                draft['version']+=1;st.rerun()
+            if current and st.button('Удалить выбранный образец из черновика',key=prefix+'_delete'):
+                draft['samples'].pop(selected);draft['version']+=1;st.rerun()
+            if draft['samples']:
+                st.caption('В черновике образцов: '+str(len(draft['samples'])))
+    return copy.deepcopy(draft['spec']),copy.deepcopy(draft['samples'])
+
+
+def _refresh_measurement_excel(excel_bytes, spec, samples, report_data):
+    workbook=openpyxl.load_workbook(io.BytesIO(excel_bytes))
+    if 'Размерная сетка' in workbook.sheetnames:del workbook['Размерная сетка']
+    if spec:_create_measurements_sheet(workbook,spec,samples,report_data)
+    out=io.BytesIO();workbook.save(out);workbook.close()
+    return out.getvalue()
+
 def _make_report_number() -> str:
     """Читаемый уникальный номер отчёта: QC-YYYYMMDD-HHMMSS-XXXX."""
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -1053,7 +1205,17 @@ if c_out.button("Выйти"):
     st.session_state.auth_user = None
     st.rerun()
 
-tab_new, tab_archive = st.tabs(["📝 Новый отчет", "🗄️ Архив отчетов"])
+st.markdown("""<style>
+[class*="st-key-archive_row_"] button { text-align:left; justify-content:flex-start; min-height:46px; border-radius:12px; }
+[data-baseweb="tab-list"] { gap:8px; padding:6px; border-radius:18px; background:rgba(127,127,127,.10); }
+[data-baseweb="tab"] { min-height:48px; height:auto; padding:12px 22px; border-radius:13px; border:1px solid transparent; transition:background .15s; }
+[data-baseweb="tab"] p { font-size:16px; font-weight:600; }
+[data-baseweb="tab"][aria-selected="true"] { background:linear-gradient(135deg,#2563eb,#4f46e5); color:white; box-shadow:0 4px 12px rgba(37,99,235,.22); }
+[data-baseweb="tab-highlight"], [data-baseweb="tab-border"] { display:none; }
+[data-testid="stVerticalBlock"] button:focus-visible { outline:2px solid #60a5fa; outline-offset:2px; }
+@media(max-width:600px) { [data-baseweb="tab"] { flex:1; padding:10px 12px; } }
+</style>""",unsafe_allow_html=True)
+tab_new, tab_archive = st.tabs(["＋ Новый отчёт", "▤ Архив отчётов"])
 
 with tab_archive:
     st.subheader("Сохраненные инспекции")
@@ -1078,65 +1240,22 @@ with tab_archive:
             None,
         )
 
-        # Когда открыт отчёт, скрываем список архива: пользователь видит только сам отчёт.
         if report_list and selected_report is None:
-            archive_action_col, _ = st.columns([2, 5])
-            with archive_action_col:
-                st.caption("Выберите отчёт, чтобы открыть его отдельно от списка.")
+            st.caption('Нажмите на строку отчёта, чтобы открыть. Время создания указано в UTC.')
+            from datetime import timezone as _utc_timezone
             for rep in report_list:
-                rid = str(rep.get("id") or "")
-                storage_path = _storage_object_path(rep.get("excel_url"))
-
-                with st.container(border=True):
-                    c1, c2, c3, c4, c5 = st.columns([2, 3, 2, 1.2, 1.2])
-
-                    c1.write(f"**{rep.get('report_no') or '-'}**")
-                    c1.caption(rep.get("inspection_date") or "-")
-
-                    c2.write(f"Товар: {rep.get('item_name') or '-'}")
-                    c2.caption(f"Поставщик: {rep.get('supplier_name') or '-'}")
-
-                    c3.write(f"Статус: **{rep.get('result_status') or '-'}**")
-
-                    if c4.button(
-                        "Открыть",
-                        key=f"open_report_{rid}",
-                        use_container_width=True,
-                        disabled=not rid,
-                    ):
-                        st.session_state.selected_report_id = rid
-                        st.rerun()
-
-                    if storage_path:
-                        if c5.button(
-                            "Скачать Excel",
-                            key=f"btn_arch_{rid}",
-                            use_container_width=True,
-                        ):
-                            with st.spinner("Загрузка Excel из облака..."):
-                                file_bytes = download_excel_from_storage(storage_path)
-
-                            if file_bytes:
-                                st.session_state[f"arch_excel_{rid}"] = file_bytes
-                                st.session_state[f"arch_name_{rid}"] = _safe_download_name(
-                                    str(rep.get("report_no") or "report"),
-                                    str(rep.get("result_status") or ""),
-                                )
-                            else:
-                                st.warning("Не удалось получить Excel из облачного хранилища.")
-
-                        cached = st.session_state.get(f"arch_excel_{rid}")
-                        if cached:
-                            st.download_button(
-                                label="📥 Сохранить файл",
-                                data=cached,
-                                file_name=st.session_state.get(f"arch_name_{rid}", "qc_report.xlsx"),
-                                mime=EXCEL_MIME,
-                                key=f"dl_arch_{rid}",
-                                use_container_width=True,
-                            )
-                    else:
-                        c5.caption("Excel не сохранен")
+                rid=str(rep.get('id') or '')
+                timestamp=str(rep.get('created_at') or '')
+                try:
+                    created=datetime.fromisoformat(timestamp.replace('Z','+00:00'))
+                    if created.tzinfo is None:created=created.replace(tzinfo=_utc_timezone.utc)
+                    created=created.astimezone(_utc_timezone.utc)
+                    clock=created.strftime('%H:%M')+' UTC'
+                except (ValueError,TypeError):clock='—'
+                label=f"{rep.get('report_no') or 'Без номера'}  ·  {rep.get('inspection_date') or '—'}  ·  {clock}"
+                if st.button(label,key='archive_row_'+rid,use_container_width=True,disabled=not bool(rid)):
+                    st.session_state.selected_report_id=rid
+                    st.rerun()
 
         # Просмотр выбранного отчёта вместо списка архива — не нужно прокручивать вниз.
         if selected_report:
@@ -1164,24 +1283,26 @@ with tab_archive:
                 st.session_state[edit_state_key] = False
 
             edit_col, download_col, _ = st.columns([2, 2, 3])
-            selected_excel_download = download_col.empty()
+            selected_excel_download=download_col.empty()
             if not st.session_state[edit_state_key]:
                 if edit_col.button(
                     "✏️ Редактировать отчет",
                     key=f"start_edit_{selected_id}",
                     use_container_width=True,
                 ):
+                    st.session_state.pop("measurement_draft_"+str(selected_id),None)
                     st.session_state[edit_state_key] = True
                     st.rerun()
 
             if st.session_state[edit_state_key]:
                 st.markdown("### Редактирование отчета")
                 st.caption(
-                    "Изменения сохраняются в базе данных. Уже созданный Excel-файл "
-                    "останется прежним, пока не будет сформирован заново."
+                    "Изменения сохраняются в данных отчёта и обновлённом Excel. "
+                    "Размерную сетку и образцы можно изменить в блоке ниже."
                 )
 
-                with st.form(key=f"edit_report_form_{selected_id}"):
+                edited_spec, edited_samples = _edit_measurements(selected_id, report_data)
+                with st.form(key=f"edit_report_form_{selected_id}", enter_to_submit=False):
                     edit_c1, edit_c2 = st.columns(2)
                     with edit_c1:
                         edited_report_no = st.text_input(
@@ -1267,6 +1388,7 @@ with tab_archive:
                     )
 
                 if cancel_changes:
+                    st.session_state.pop("measurement_draft_"+str(selected_id),None)
                     st.session_state[edit_state_key] = False
                     st.rerun()
 
@@ -1293,6 +1415,8 @@ with tab_archive:
                             "conclusion": edited_conclusion,
                         })
 
+                        updated_report_data['measurements'] = _measurement_snapshot(edited_spec, edited_samples)
+
                         # Если добавлены фото, обновляем существующий Excel, не теряя исходные замеры и изображения.
                         if True:
                             selected_path_for_update = _storage_object_path(selected_report.get("excel_url"))
@@ -1307,7 +1431,8 @@ with tab_archive:
                                 for item in (uploaded_files or []):
                                     added_photos.append((section_title, item.getvalue()))
                             refreshed_excel = append_photos_to_existing_excel(old_excel_bytes, added_photos, updated_for_excel)
-                            upload_path = selected_path_for_update
+                            refreshed_excel = _refresh_measurement_excel(refreshed_excel, edited_spec, edited_samples, updated_for_excel)
+                            upload_path = selected_path_for_update.rsplit('/',1)[0] + '/report_' + uuid.uuid4().hex + '.xlsx' 
                             upload_result = supabase.storage.from_(QC_REPORTS_BUCKET).upload(
                                 upload_path,
                                 refreshed_excel,
@@ -1315,8 +1440,6 @@ with tab_archive:
                             )
                             if _storage_call_failed(upload_result):
                                 raise RuntimeError("Supabase не подтвердил обновление Excel-файла.")
-                            st.session_state[f"selected_excel_{selected_id}"] = refreshed_excel
-                            st.session_state[f"selected_photos_{selected_id}"] = extract_images_from_excel(refreshed_excel)
 
                         update_fields = {
                             "report_no": edited_report_no.strip(),
@@ -1328,9 +1451,10 @@ with tab_archive:
                             "inspection_date": normalized_date or None,
                             "result_status": edited_status,
                             "report_data": updated_report_data,
+                            "excel_url": upload_path,
                         }
 
-                        (
+                        update_response = (
                             supabase.table("reports")
                             .update(update_fields)
                             .eq("id", selected_id)
@@ -1338,6 +1462,12 @@ with tab_archive:
                             .execute()
                         )
 
+                        confirmed_rows = _response_data_list(update_response)
+                        if not confirmed_rows or str(confirmed_rows[0].get('id')) != str(selected_id):
+                            raise RuntimeError('База данных не подтвердила сохранение отчёта. Черновик оставлен открытым.')
+                        st.session_state[f"selected_excel_{selected_id}"] = refreshed_excel
+                        st.session_state[f"selected_photos_{selected_id}"] = extract_images_from_excel(refreshed_excel)
+                        st.session_state.pop("measurement_draft_"+str(selected_id),None)
                         st.session_state[edit_state_key] = False
                         st.success("Изменения сохранены.")
                         st.rerun()
@@ -1370,6 +1500,9 @@ with tab_archive:
             st.markdown("### Заключение инспекции")
             conclusion = report_data.get("conclusion") or ""
             st.write(conclusion if conclusion else "—")
+
+            view_spec, view_samples = _measurement_state(report_data)
+            _render_measurement_view(view_spec, view_samples, 'saved_'+str(selected_id))
 
             # Загружаем Excel из Storage и показываем фотографии, встроенные в отчет.
             selected_path = _storage_object_path(selected_report.get("excel_url"))
@@ -1669,7 +1802,8 @@ with tab_new:
             "result_status": result_status,
             "inspector_comments": raw_comments,
             "comments": raw_comments,  # backward compatibility with older report records
-            "conclusion": final_comments
+            "conclusion": final_comments,
+            "measurements": _measurement_snapshot(st.session_state.reference_spec if use_spec else None, st.session_state.measured_samples if use_spec else [])
         }
         
         try:
@@ -1677,8 +1811,8 @@ with tab_new:
                 excel_bytes = create_full_qc_report(
                     report_data=rep_payload,
                     photos_by_section=photos_data,
-                    spec_data=st.session_state.reference_spec,
-                    measured_samples=st.session_state.measured_samples
+                    spec_data=st.session_state.reference_spec if use_spec else None,
+                    measured_samples=st.session_state.measured_samples if use_spec else []
                 )
                 st.session_state.last_excel_bytes = excel_bytes
                 st.session_state.last_excel_name = _safe_download_name(report_no, result_status)

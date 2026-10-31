@@ -83,6 +83,90 @@ def apply_range_style(ws, min_col, min_row, max_col, max_row, border=None, fill=
 # ==============================================================================
 # МОДУЛЬ ГЕНЕРАЦИИ EXCEL (HD-ФОТОСЕТКА С ПОДПИСЯМИ СЕКЦИЙ)
 # ==============================================================================
+
+def _draw_report_photo_section(ws, row, title, photos):
+    """Three centered crops; 24 px image-to-image gap in both directions."""
+    from openpyxl.drawing.spreadsheet_drawing import OneCellAnchor, AnchorMarker
+    from openpyxl.drawing.xdr import XDRPositiveSize2D
+    from openpyxl.utils.units import pixels_to_EMU
+    from openpyxl.utils import get_column_letter
+    ws.merge_cells(start_row=row, start_column=2, end_row=row, end_column=10)
+    cell = ws.cell(row, 2, title)
+    cell.fill = PatternFill('solid', fgColor='334155')
+    cell.font = Font(name='Calibri', size=10, bold=True, color='FFFFFF')
+    cell.alignment = Alignment(vertical='center', indent=1)
+    ws.row_dimensions[row].height = 24
+    row += 1
+    slots = [(2, 4), (5, 7), (8, 10)]
+    gap, padding, caption_px = 24, 4, 16
+    widths = [sum(int((ws.column_dimensions[get_column_letter(c)].width or 15) * 7 + 5)
+                  for c in range(left, right + 1)) for left, right in slots]
+    image_w = min(widths) - gap
+    image_h = round(image_w * 9 / 16)
+    for base in range(0, len(photos), 3):
+        ws.row_dimensions[row].height = (image_h + 2 * padding) * .75
+        ws.row_dimensions[row + 1].height = caption_px * .75
+        for slot, (left, right) in enumerate(slots):
+            idx = base + slot
+            ws.merge_cells(start_row=row, start_column=left, end_row=row, end_column=right)
+            ws.merge_cells(start_row=row + 1, start_column=left, end_row=row + 1, end_column=right)
+            if idx >= len(photos):
+                continue
+            photo = photos[idx]
+            with Image.open(io.BytesIO(photo['bytes'])) as source:
+                image = ImageOps.exif_transpose(source).convert('RGB')
+                image = ImageOps.fit(image, (image_w * 4, image_h * 4),
+                                     method=Image.Resampling.LANCZOS, centering=(.5, .5))
+                buffer = io.BytesIO()
+                image.save(buffer, format='JPEG', quality=94)
+            buffer.seek(0)
+            picture = OpenPyXLImage(buffer)
+            picture.width, picture.height = image_w, image_h
+            picture.anchor = OneCellAnchor(
+                _from=AnchorMarker(col=left - 1, row=row - 1,
+                    colOff=pixels_to_EMU((widths[slot] - image_w) // 2),
+                    rowOff=pixels_to_EMU(padding)),
+                ext=XDRPositiveSize2D(pixels_to_EMU(image_w), pixels_to_EMU(image_h)))
+            ws.add_image(picture)
+            caption = ws.cell(row + 1, left, photo.get('caption') or f'{title} — {idx + 1}')
+            caption.font = Font(name='Calibri', size=8, color='64748B')
+            caption.alignment = Alignment(horizontal='center', vertical='center', shrink_to_fit=True)
+        row += 2
+    return row
+
+
+def _finish_report_layout(ws, last_row):
+    from copy import copy
+    from openpyxl.utils import get_column_letter
+    from openpyxl.worksheet.page import PageMargins
+    right = max(10, max((cell.column for row in ws for cell in row if cell.value is not None), default=10))
+    for merged in list(ws.merged_cells.ranges):
+        if merged.max_col == 9 and all(ws.cell(r, 10).value is None for r in range(merged.min_row, merged.max_row + 1)):
+            first_col, r1, r2 = merged.min_col, merged.min_row, merged.max_row
+            ws.unmerge_cells(str(merged))
+            ws.merge_cells(start_row=r1, end_row=r2, start_column=first_col, end_column=10)
+    edge = Side(style='medium', color='334155')
+    for r in range(2, last_row + 1):
+        for c in range(2, right + 1):
+            cell = ws.cell(r, c)
+            if cell.fill.patternType is None:
+                cell.fill = PatternFill('solid', fgColor='FFFFFF')
+            border = copy(cell.border)
+            if c == 2: border.left = edge
+            if c == right: border.right = edge
+            if r == 2: border.top = edge
+            if r == last_row: border.bottom = edge
+            cell.border = border
+    ws.sheet_view.showGridLines = False
+    ws.print_area = f'B2:{get_column_letter(right)}{last_row}'
+    ws.sheet_properties.pageSetUpPr.fitToPage = True
+    ws.page_setup.orientation = 'landscape'
+    ws.page_setup.paperSize = ws.PAPERSIZE_A4
+    ws.page_setup.fitToWidth = 1
+    ws.page_setup.fitToHeight = 0
+    ws.print_options.horizontalCentered = True
+    ws.page_margins = PageMargins(left=.25, right=.25, top=.35, bottom=.35, header=.15, footer=.15)
+
 def create_full_qc_report(
     report_data: dict, 
     photos_by_section: dict, 
@@ -281,79 +365,11 @@ def create_full_qc_report(
         "defects": "DEFECT DETAILS & LOG"
     }
 
-    # Три равных фото-слота: B:D, E:G, H:J.
     ws.column_dimensions["J"].width = 15
-    slots = [
-        (2, 4, 'B'),
-        (5, 7, 'E'),
-        (8, 10, 'H'),
-    ]
-    photo_display_w = 270
-    photo_display_h = 152
-    photo_row_h = 116
-
-    for s_key, s_label in section_titles.items():
-        photos = photos_by_section.get(s_key, [])
-        if not photos:
-            continue
-
-        ws.merge_cells(start_row=curr_row, start_column=2, end_row=curr_row, end_column=10)
-        ws.row_dimensions[curr_row].height = 20
-        t_cell = ws.cell(row=curr_row, column=2, value=s_label)
-        t_cell.fill = PatternFill(start_color=c_header, fill_type="solid")
-        t_cell.font = Font(name="Calibri", size=10, bold=True, color="FFFFFF")
-        t_cell.alignment = Alignment(horizontal="left", vertical="center", indent=1)
-        apply_range_style(ws, 2, curr_row, 10, curr_row, border=thin_border)
-        curr_row += 1
-
-        for i in range(0, len(photos), 3):
-            photo_row = curr_row
-            caption_row = curr_row + 1
-            ws.row_dimensions[photo_row].height = photo_row_h
-            ws.row_dimensions[caption_row].height = 16
-
-            for slot_idx, (sc, ec, col_letter) in enumerate(slots):
-                p_idx = i + slot_idx
-                if p_idx < len(photos):
-                    p_info = photos[p_idx]
-                    
-                    ws.merge_cells(start_row=photo_row, start_column=sc, end_row=photo_row, end_column=ec)
-                    apply_range_style(ws, sc, photo_row, ec, photo_row, border=thin_border)
-
-                    img = Image.open(io.BytesIO(p_info["bytes"]))
-                    img = ImageOps.exif_transpose(img)
-                    
-                    if img.mode in ("RGBA", "LA", "P"):
-                        background = Image.new("RGB", img.size, (255, 255, 255))
-                        if img.mode == "P":
-                            img = img.convert("RGBA")
-                        if "A" in img.mode:
-                            background.paste(img, mask=img.split()[-1])
-                            img = background
-                        else:
-                            img = img.convert("RGB")
-                    elif img.mode != "RGB":
-                        img = img.convert("RGB")
-
-                    img = ImageOps.fit(img, (1200, 675), method=Image.Resampling.LANCZOS)
-                    
-                    img_buf = io.BytesIO()
-                    img.save(img_buf, format="JPEG", quality=92)
-                    img_buf.seek(0)
-
-                    xl_img = OpenPyXLImage(img_buf)
-                    xl_img.width = photo_display_w
-                    xl_img.height = photo_display_h
-                    ws.add_image(xl_img, f"{col_letter}{photo_row}")
-
-                    ws.merge_cells(start_row=caption_row, start_column=sc, end_row=caption_row, end_column=ec)
-                    cap_text = p_info.get("caption") or f"{s_label} — {p_idx + 1}"
-                    cap_cell = ws.cell(row=caption_row, column=sc, value=cap_text)
-                    cap_cell.font = Font(name="Calibri", size=8, italic=True, color=c_sub)
-                    cap_cell.alignment = Alignment(horizontal="center", vertical="center")
-                    apply_range_style(ws, sc, caption_row, ec, caption_row, border=thin_border)
-
-            curr_row += 2
+    for key, title in section_titles.items():
+        photos = photos_by_section.get(key, [])
+        if photos:
+            curr_row = _draw_report_photo_section(ws, curr_row, title, photos)
 
     # 5. Отдельные блоки комментариев инспектора и заключения
     def add_text_block(title: str, text: str, row: int) -> int:
@@ -393,6 +409,7 @@ def create_full_qc_report(
         result_cell.fill = PatternFill(start_color=c_pend_fg, end_color=c_pend_fg, fill_type="solid")
     apply_range_style(ws, 2, curr_row, 9, curr_row, border=thin_border)
 
+    _finish_report_layout(ws, curr_row)
     out = io.BytesIO()
     wb.save(out)
     return out.getvalue()
@@ -589,7 +606,7 @@ def append_photos_to_existing_excel(excel_bytes: bytes, new_photos: list[tuple[s
         else:
             # Если старый файл был создан прежней версией и секция не распознана,
             # не теряем фотографии: помещаем их в секцию продукции.
-            grouped["products"].append({"bytes": item["bytes"], "caption": item.get("label", "")})
+            grouped["PRODUCT WORKMANSHIP PHOTOS"].append({"bytes": item["bytes"], "caption": item.get("label", "")})
 
     # Новые фотографии закрепляются за выбранным разделом.
     for section_title, raw in new_photos:
@@ -613,70 +630,19 @@ def append_photos_to_existing_excel(excel_bytes: bytes, new_photos: list[tuple[s
     # Удаляем изображения (они будут вставлены заново в корректную сетку 3 в ряд).
     ws._images = []
     if start_row <= ws.max_row:
+        for merged in list(ws.merged_cells.ranges):
+            if merged.min_row >= start_row:
+                ws.unmerge_cells(str(merged))
         ws.delete_rows(start_row, ws.max_row - start_row + 1)
 
-    # Сетка из трёх фото в ряд; секции с пустым списком не выводятся.
-    c_header = "334155"
-    c_sub = "475569"
-    c_border = "CBD5E1"
-    thin_border = Border(
-        left=Side(style="thin", color=c_border),
-        right=Side(style="thin", color=c_border),
-        top=Side(style="thin", color=c_border),
-        bottom=Side(style="thin", color=c_border),
-    )
     for col_letter in ["B", "C", "D", "E", "F", "G", "H", "I", "J"]:
-        if ws.column_dimensions[col_letter].width is None:
-            ws.column_dimensions[col_letter].width = 15
+        ws.column_dimensions[col_letter].width = 15
+    c_header, c_sub = "334155", "475569"
+    thin_border = Border(*( [Side(style="thin", color="CBD5E1")] * 4 ))
     row = start_row
-    slots = [(2, 4, "B"), (5, 7, "E"), (8, 10, "H")]
-
     for section_key, section_title in section_order:
-        photos = grouped[section_key]
-        if not photos:
-            continue
-        ws.merge_cells(start_row=row, start_column=2, end_row=row, end_column=10)
-        header = ws.cell(row=row, column=2, value=section_key)
-        header.fill = PatternFill(start_color=c_header, end_color=c_header, fill_type="solid")
-        header.font = Font(name="Calibri", size=10, bold=True, color="FFFFFF")
-        header.alignment = Alignment(horizontal="left", vertical="center", indent=1)
-        ws.row_dimensions[row].height = 22
-        apply_range_style(ws, 2, row, 10, row, border=thin_border)
-        row += 1
-
-        for base in range(0, len(photos), 3):
-            image_row = row
-            caption_row = row + 1
-            ws.row_dimensions[image_row].height = 116
-            ws.row_dimensions[caption_row].height = 16
-            for slot_idx, (start_col, end_col, anchor_col) in enumerate(slots):
-                photo_idx = base + slot_idx
-                if photo_idx >= len(photos):
-                    continue
-                p = photos[photo_idx]
-                raw = p["bytes"]
-                try:
-                    with Image.open(io.BytesIO(raw)) as source:
-                        image = ImageOps.exif_transpose(source).convert("RGB")
-                        image = ImageOps.fit(image, (900, 506), method=Image.Resampling.LANCZOS)
-                        buffer = io.BytesIO()
-                        image.save(buffer, format="JPEG", quality=90)
-                        buffer.seek(0)
-                    ws.merge_cells(start_row=image_row, start_column=start_col, end_row=image_row, end_column=end_col)
-                    apply_range_style(ws, start_col, image_row, end_col, image_row, border=thin_border)
-                    xl_img = OpenPyXLImage(buffer)
-                    xl_img.width = 270
-                    xl_img.height = 152
-                    ws.add_image(xl_img, f"{anchor_col}{image_row}")
-                    ws.merge_cells(start_row=caption_row, start_column=start_col, end_row=caption_row, end_column=end_col)
-                    caption = p.get("caption") or f"{section_title} — {photo_idx + 1}"
-                    cap_cell = ws.cell(row=caption_row, column=start_col, value=caption)
-                    cap_cell.font = Font(name="Calibri", size=8, italic=True, color=c_sub)
-                    cap_cell.alignment = Alignment(horizontal="center", vertical="center")
-                    apply_range_style(ws, start_col, caption_row, end_col, caption_row, border=thin_border)
-                except Exception:
-                    continue
-            row += 2
+        if grouped[section_key]:
+            row = _draw_report_photo_section(ws, row, section_key, grouped[section_key])
 
     # Обновляем отдельные текстовые блоки и дублируем результат внизу.
     row += 1
@@ -711,6 +677,7 @@ def append_photos_to_existing_excel(excel_bytes: bytes, new_photos: list[tuple[s
     ws.row_dimensions[row].height = 28
     apply_range_style(ws, 2, row, 10, row, border=thin_border)
 
+    _finish_report_layout(ws, row)
     output = io.BytesIO()
     wb.save(output)
     wb.close()
@@ -796,7 +763,7 @@ def show_photo_viewer():
     index = int(st.session_state.get("photo_viewer_index", 0)) % len(photos)
     st.session_state.photo_viewer_index = index
 
-    # Увеличенный резервный диалог; основной просмотрщик вынесен за iframe.
+    # Диалог занимает около 80% ширины окна приложения; фото не растягивается по высоте.
     st.markdown(
         """<style>
         div[role="dialog"] { width: 98vw !important; max-width: 98vw !important; min-width: 0 !important; }
@@ -876,60 +843,34 @@ def render_clickable_photo_gallery(photos: list, height: int | None = None) -> N
 .overlay.open{{display:flex}} .top{{width:100%;display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:10px}}
 .action{{border:1px solid #666;border-radius:8px;padding:9px 13px;background:#222;color:white;cursor:pointer;font-size:15px}}
 .photo-wrap{{position:relative;display:flex;align-items:center;justify-content:center;width:100%;flex:1;min-height:0}}
-.big{{max-width:100%;max-height:100%;object-fit:contain;border-radius:5px}} .arrow{{position:absolute;top:50%;transform:translateY(-50%);z-index:2;font-size:25px;min-width:42px;padding:10px 5px;background:rgba(0,0,0,.55)}} #prev{{left:4px}} #next{{right:4px}}
-@media(max-width:600px){{.gallery{{grid-template-columns:repeat(2,minmax(0,1fr))}}.thumb img{{height:96px}}.big{{max-width:100%;max-height:100%}}.arrow{{min-width:30px}}}}
+.big{{max-width:100%;max-height:100%;object-fit:contain;border-radius:5px}} .arrow{{position:absolute;top:50%;transform:translateY(-50%);font-size:25px;min-width:42px;padding:10px 5px;z-index:2}} #prev{{left:4px}} #next{{right:4px}}
+@media(max-width:600px){{.gallery{{grid-template-columns:repeat(2,minmax(0,1fr))}}.thumb img{{height:96px}}.big{{max-width:100%}}.arrow{{min-width:30px}}}}
 </style></head><body><div class="gallery" id="gallery"></div>
 <div class="overlay" id="overlay" role="dialog" aria-modal="true"><div class="top"><span id="counter">Фото 1 из {len(items)}</span><button class="action" id="close">✕ Закрыть</button></div>
 <div class="photo-wrap"><button class="action arrow" id="prev">←</button><img class="big" id="big" alt="Увеличенная фотография"><button class="action arrow" id="next">→</button></div></div>
 <script>
 const photos = {gallery_json}; let current = 0;
-const gallery=document.getElementById('gallery');
-let viewerRoot=document, viewerHost=null, viewerDocument=document, previousFocus=null;
-// Render outside the Streamlit iframe when same-origin access is available.
+let viewerRoot=document,viewerHost=null,viewerDoc=document;
 try{{
-  const parentDocument=window.parent.document;
-  if(parentDocument!==document){{
-    viewerHost=parentDocument.createElement('div');
-    viewerHost.style.cssText='position:fixed;inset:0;z-index:2147483647;display:none';
-    const shadow=viewerHost.attachShadow({{mode:'open'}});
-    const style=document.createElement('style');
-    style.textContent=document.querySelector('style').textContent;
-    shadow.appendChild(style);
-    shadow.appendChild(document.getElementById('overlay').cloneNode(true));
-    parentDocument.body.appendChild(viewerHost);
-    viewerRoot=shadow;viewerDocument=parentDocument;
-  }}
-}}catch(error){{console.warn('Full-window viewer unavailable; using browser fullscreen fallback.',error)}}
-const overlay=viewerRoot.getElementById('overlay'),big=viewerRoot.getElementById('big'),counter=viewerRoot.getElementById('counter');
+ const d=window.parent.document;
+ if(d!==document){{
+  viewerHost=d.createElement('div');viewerHost.style.cssText='position:fixed;inset:0;z-index:2147483647;display:none';
+  viewerRoot=viewerHost.attachShadow({{mode:'open'}});
+  const css=document.createElement('style');css.textContent=document.querySelector('style').textContent;
+  viewerRoot.append(css,document.getElementById('overlay').cloneNode(true));d.body.append(viewerHost);viewerDoc=d;
+ }}
+}}catch(e){{console.warn('Using iframe fullscreen fallback',e)}}
+const gallery=document.getElementById('gallery'),overlay=viewerRoot.getElementById('overlay'),big=viewerRoot.getElementById('big'),counter=viewerRoot.getElementById('counter');
 function fitPhoto(){{
-  if(!big.naturalWidth || !overlay.classList.contains('open'))return;
-  const area=big.parentElement;
-  const scale=Math.min(area.clientWidth/big.naturalWidth,area.clientHeight/big.naturalHeight);
-  big.style.width=`${{big.naturalWidth*scale}}px`;
-  big.style.height=`${{big.naturalHeight*scale}}px`;
+ if(!big.naturalWidth || !overlay.classList.contains('open'))return;
+ const area=big.parentElement,scale=Math.min(area.clientWidth/big.naturalWidth,area.clientHeight/big.naturalHeight);
+ big.style.width=`${{big.naturalWidth*scale}}px`;big.style.height=`${{big.naturalHeight*scale}}px`;
 }}
 big.addEventListener('load',fitPhoto);
-const viewerResize=new ResizeObserver(fitPhoto);viewerResize.observe(big.parentElement);
-function closeViewer(){{
-  overlay.classList.remove('open');
-  if(viewerHost)viewerHost.style.display='none';
-  if(document.fullscreenElement===document.documentElement && document.exitFullscreen)document.exitFullscreen().catch(()=>{{}});
-  if(previousFocus && previousFocus.isConnected)previousFocus.focus();
-}}
-function show(i){{
-  const wasOpen=overlay.classList.contains('open');
-  current=(i+photos.length)%photos.length;big.src=photos[current].src;
-  big.alt=photos[current].label;
-  counter.textContent=`Фото ${{current+1}} из ${{photos.length}}`;
-  if(viewerHost)viewerHost.style.display='block';
-  overlay.classList.add('open');
-  fitPhoto();
-  if(!wasOpen){{
-    previousFocus=document.activeElement;
-    viewerRoot.getElementById('close').focus();
-    if(!viewerHost && document.documentElement.requestFullscreen)document.documentElement.requestFullscreen().catch(()=>{{}});
-  }}
-}}
+const resizeObserver=new ResizeObserver(fitPhoto);resizeObserver.observe(big.parentElement);
+function closeViewer(){{overlay.classList.remove('open');if(viewerHost)viewerHost.style.display='none';if(document.fullscreenElement && document.exitFullscreen)document.exitFullscreen().catch(()=>{{}})}}
+
+function show(i){{current=(i+photos.length)%photos.length;big.src=photos[current].src;counter.textContent=`Фото ${{current+1}} из ${{photos.length}}`;overlay.classList.add('open');if(viewerHost)viewerHost.style.display='block';else if(!document.fullscreenElement && document.documentElement.requestFullscreen)document.documentElement.requestFullscreen().catch(()=>{{}});fitPhoto()}}
 let lastSection = null;
 photos.forEach((p,i)=>{{
   if(p.section && p.section !== lastSection){{
@@ -941,37 +882,15 @@ photos.forEach((p,i)=>{{
   b.appendChild(img);b.appendChild(label);b.addEventListener('click',()=>show(i));gallery.appendChild(b);
 }});
 viewerRoot.getElementById('close').addEventListener('click',closeViewer);
-viewerRoot.getElementById('prev').addEventListener('click',()=>show(current-1));
-viewerRoot.getElementById('next').addEventListener('click',()=>show(current+1));
-overlay.addEventListener('click',e=>{{if(!e.target.closest('button') && e.target!==big)closeViewer()}});
-function handleViewerKey(e){{
-  if(!overlay.classList.contains('open'))return;
-  if(e.key==='Escape'){{e.preventDefault();closeViewer()}}
-  if(e.key==='ArrowLeft'){{e.preventDefault();show(current-1)}}
-  if(e.key==='ArrowRight'){{e.preventDefault();show(current+1)}}
-  if(e.key==='Tab'){{
-    const buttons=Array.from(overlay.querySelectorAll('button'));
-    const active=viewerRoot.activeElement || document.activeElement;
-    const pos=buttons.indexOf(active);
-    e.preventDefault();buttons[(pos+(e.shiftKey?-1:1)+buttons.length)%buttons.length].focus();
-  }}
-}}
-viewerDocument.addEventListener('keydown',handleViewerKey);
-if(viewerDocument!==document)document.addEventListener('keydown',handleViewerKey);
-window.addEventListener('pagehide',()=>{{
-  viewerResize.disconnect();
-  viewerDocument.removeEventListener('keydown',handleViewerKey);
-  if(viewerHost)viewerHost.remove();
-}});
-if(viewerHost){{
-  const frame=window.frameElement;
-  if(frame){{
-    const observer=new window.parent.MutationObserver(()=>{{
-      if(!frame.isConnected){{viewerDocument.removeEventListener('keydown',handleViewerKey);viewerHost.remove();observer.disconnect()}}
-    }});
-    observer.observe(viewerDocument.body,{{childList:true,subtree:true}});
-    window.addEventListener('pagehide',()=>observer.disconnect());
-  }}
+viewerRoot.getElementById('prev').addEventListener('click',()=>show(current-1));viewerRoot.getElementById('next').addEventListener('click',()=>show(current+1));
+viewerDoc.addEventListener('keydown',e=>{{if(!overlay.classList.contains('open'))return;if(e.key==='Escape')closeViewer();if(e.key==='ArrowLeft')show(current-1);if(e.key==='ArrowRight')show(current+1)}});
+overlay.addEventListener('click',e=>{{if(e.target!==big && !e.target.closest('button'))closeViewer()}});
+window.addEventListener('pagehide',()=>{{resizeObserver.disconnect();if(viewerHost)viewerHost.remove()}});
+if(viewerHost && window.frameElement){{
+ const frame=window.frameElement;
+ const observer=new window.parent.MutationObserver(()=>{{if(!frame.isConnected){{viewerHost.remove();resizeObserver.disconnect();observer.disconnect()}}}});
+ observer.observe(viewerDoc.body,{{childList:true,subtree:true}});
+ window.addEventListener('pagehide',()=>observer.disconnect());
 }}
 </script></body></html>'''
     components.html(html, height=max(300, min(height, 560)), scrolling=False)

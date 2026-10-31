@@ -84,88 +84,144 @@ def apply_range_style(ws, min_col, min_row, max_col, max_row, border=None, fill=
 # МОДУЛЬ ГЕНЕРАЦИИ EXCEL (HD-ФОТОСЕТКА С ПОДПИСЯМИ СЕКЦИЙ)
 # ==============================================================================
 
-def _draw_report_photo_section(ws, row, title, photos):
-    """Three centered crops; 24 px image-to-image gap in both directions."""
-    from openpyxl.drawing.spreadsheet_drawing import OneCellAnchor, AnchorMarker
-    from openpyxl.drawing.xdr import XDRPositiveSize2D
-    from openpyxl.utils.units import pixels_to_EMU
-    from openpyxl.utils import get_column_letter
-    ws.merge_cells(start_row=row, start_column=2, end_row=row, end_column=10)
-    cell = ws.cell(row, 2, title)
-    cell.fill = PatternFill('solid', fgColor='334155')
-    cell.font = Font(name='Calibri', size=10, bold=True, color='FFFFFF')
-    cell.alignment = Alignment(vertical='center', indent=1)
-    ws.row_dimensions[row].height = 24
-    row += 1
-    slots = [(2, 4), (5, 7), (8, 10)]
-    gap, padding, caption_px = 24, 4, 16
-    widths = [sum(int((ws.column_dimensions[get_column_letter(c)].width or 15) * 7 + 5)
-                  for c in range(left, right + 1)) for left, right in slots]
-    image_w = min(widths) - gap
-    image_h = round(image_w * 9 / 16)
-    for base in range(0, len(photos), 3):
-        ws.row_dimensions[row].height = (image_h + 2 * padding) * .75
-        ws.row_dimensions[row + 1].height = caption_px * .75
-        for slot, (left, right) in enumerate(slots):
-            idx = base + slot
-            ws.merge_cells(start_row=row, start_column=left, end_row=row, end_column=right)
-            ws.merge_cells(start_row=row + 1, start_column=left, end_row=row + 1, end_column=right)
-            if idx >= len(photos):
-                continue
-            photo = photos[idx]
-            with Image.open(io.BytesIO(photo['bytes'])) as source:
-                image = ImageOps.exif_transpose(source).convert('RGB')
-                image = ImageOps.fit(image, (image_w * 4, image_h * 4),
-                                     method=Image.Resampling.LANCZOS, centering=(.5, .5))
-                buffer = io.BytesIO()
-                image.save(buffer, format='JPEG', quality=94)
-            buffer.seek(0)
-            picture = OpenPyXLImage(buffer)
-            picture.width, picture.height = image_w, image_h
-            picture.anchor = OneCellAnchor(
-                _from=AnchorMarker(col=left - 1, row=row - 1,
-                    colOff=pixels_to_EMU((widths[slot] - image_w) // 2),
-                    rowOff=pixels_to_EMU(padding)),
-                ext=XDRPositiveSize2D(pixels_to_EMU(image_w), pixels_to_EMU(image_h)))
-            ws.add_image(picture)
-            caption = ws.cell(row + 1, left, photo.get('caption') or f'{title} — {idx + 1}')
-            caption.font = Font(name='Calibri', size=8, color='64748B')
-            caption.alignment = Alignment(horizontal='center', vertical='center', shrink_to_fit=True)
-        row += 2
-    return row
+def _size_sort_key(value):
+    import re
+    text = str(value).strip().upper().replace(' ', '')
+    order = {'XXXS':0, '3XS':0, 'XXS':1, '2XS':1, 'XS':2, 'S':3, 'M':4,
+             'L':5, 'XL':6, 'XXL':7, '2XL':7, 'XXXL':8, '3XL':8, '4XL':9, '5XL':10, '6XL':11}
+    if text in order:
+        return (0, order[text], '')
+    numbers = re.findall(r'\d+(?:[.,]\d+)?', text)
+    if numbers:
+        return (1, tuple(float(n.replace(',', '.')) for n in numbers), text)
+    return (2, (), text)
 
 
-def _finish_report_layout(ws, last_row):
+def _frame_report(ws, last_row, right=10):
     from copy import copy
     from openpyxl.utils import get_column_letter
     from openpyxl.worksheet.page import PageMargins
-    right = max(10, max((cell.column for row in ws for cell in row if cell.value is not None), default=10))
-    for merged in list(ws.merged_cells.ranges):
-        if merged.max_col == 9 and all(ws.cell(r, 10).value is None for r in range(merged.min_row, merged.max_row + 1)):
-            first_col, r1, r2 = merged.min_col, merged.min_row, merged.max_row
-            ws.unmerge_cells(str(merged))
-            ws.merge_cells(start_row=r1, end_row=r2, start_column=first_col, end_column=10)
     edge = Side(style='medium', color='334155')
-    for r in range(2, last_row + 1):
-        for c in range(2, right + 1):
-            cell = ws.cell(r, c)
+    for row in ws.iter_rows(min_row=2, max_row=last_row, min_col=2, max_col=right):
+        for cell in row:
             if cell.fill.patternType is None:
                 cell.fill = PatternFill('solid', fgColor='FFFFFF')
-            border = copy(cell.border)
-            if c == 2: border.left = edge
-            if c == right: border.right = edge
-            if r == 2: border.top = edge
-            if r == last_row: border.bottom = edge
-            cell.border = border
+            b = copy(cell.border)
+            if cell.column == 2: b.left = edge
+            if cell.column == right: b.right = edge
+            if cell.row == 2: b.top = edge
+            if cell.row == last_row: b.bottom = edge
+            cell.border = b
     ws.sheet_view.showGridLines = False
     ws.print_area = f'B2:{get_column_letter(right)}{last_row}'
     ws.sheet_properties.pageSetUpPr.fitToPage = True
     ws.page_setup.orientation = 'landscape'
     ws.page_setup.paperSize = ws.PAPERSIZE_A4
-    ws.page_setup.fitToWidth = 1
-    ws.page_setup.fitToHeight = 0
+    ws.page_setup.fitToWidth, ws.page_setup.fitToHeight = 1, 0
     ws.print_options.horizontalCentered = True
-    ws.page_margins = PageMargins(left=.25, right=.25, top=.35, bottom=.35, header=.15, footer=.15)
+    ws.page_margins = PageMargins(left=.25,right=.25,top=.35,bottom=.35,header=.15,footer=.15)
+
+
+def _photo_section(ws, row, title, photos):
+    from openpyxl.drawing.spreadsheet_drawing import OneCellAnchor, AnchorMarker
+    from openpyxl.drawing.xdr import XDRPositiveSize2D
+    from openpyxl.utils.units import pixels_to_EMU
+    ws.merge_cells(start_row=row, start_column=2, end_row=row, end_column=10)
+    c = ws.cell(row,2,title); c.fill=PatternFill('solid',fgColor='334155')
+    c.font=Font(name='Calibri',size=10,bold=True,color='FFFFFF')
+    c.alignment=Alignment(vertical='center',indent=1)
+    ws.row_dimensions[row].height=24
+    row += 1
+    width, height = 306, 172
+    for base in range(0,len(photos),3):
+        ws.row_dimensions[row].height=(height+8)*.75
+        ws.row_dimensions[row+1].height=12
+        for slot,left in enumerate((2,5,8)):
+            ws.merge_cells(start_row=row,start_column=left,end_row=row,end_column=left+2)
+            ws.merge_cells(start_row=row+1,start_column=left,end_row=row+1,end_column=left+2)
+            idx=base+slot
+            if idx>=len(photos): continue
+            photo=photos[idx]
+            with Image.open(io.BytesIO(photo['bytes'])) as source:
+                image=ImageOps.exif_transpose(source).convert('RGB')
+                image=ImageOps.fit(image,(width*4,height*4),method=Image.Resampling.LANCZOS,centering=(.5,.5))
+                buf=io.BytesIO();image.save(buf,format='JPEG',quality=94)
+            buf.seek(0)
+            pic=OpenPyXLImage(buf);pic.width=width;pic.height=height
+            pic.anchor=OneCellAnchor(_from=AnchorMarker(col=left-1,row=row-1,colOff=pixels_to_EMU(12),rowOff=pixels_to_EMU(4)),
+                ext=XDRPositiveSize2D(pixels_to_EMU(width),pixels_to_EMU(height)))
+            ws.add_image(pic)
+            c=ws.cell(row+1,left,photo.get('caption') or f'{title} — {idx+1}')
+            c.font=Font(name='Calibri',size=8,color='64748B')
+            c.alignment=Alignment(horizontal='center',vertical='center',shrink_to_fit=True)
+        row+=2
+    return row
+
+
+def _create_measurements_sheet(wb, spec, samples, report_data):
+    from openpyxl.utils import get_column_letter
+    ws=wb.create_sheet('Размерная сетка')
+    ws.column_dimensions['A'].width=3
+    for col,width in zip('BCDEFGHI',(12,38,14,14,14,14,14,20)):
+        ws.column_dimensions[col].width=width
+    border=Border(*( [Side(style='thin',color='CBD5E1')]*4 ))
+    row=2
+    def title(text, color='334155'):
+        nonlocal row
+        ws.merge_cells(start_row=row,start_column=2,end_row=row,end_column=9)
+        c=ws.cell(row,2,text);c.fill=PatternFill('solid',fgColor=color)
+        c.font=Font(name='Calibri',size=11,bold=True,color='FFFFFF')
+        c.alignment=Alignment(vertical='center',indent=1,wrap_text=True)
+        ws.row_dimensions[row].height=28;row+=1
+    def cells(values, header=False):
+        nonlocal row
+        for col,value in enumerate(values,2):
+            c=ws.cell(row,col,value);c.border=border
+            c.font=Font(name='Calibri',size=9,bold=header,color='FFFFFF' if header else '0F172A')
+            c.fill=PatternFill('solid',fgColor='475569' if header else ('F8FAFC' if row%2 else 'FFFFFF'))
+            c.alignment=Alignment(horizontal='left' if col==3 else 'center',vertical='center',wrap_text=True)
+        ws.row_dimensions[row].height=30 if header else 28
+        row+=1
+    title(f"РАЗМЕРНАЯ СЕТКА — {report_data.get('report_no','')} — {spec.get('unit','cm')}",'1E293B')
+    poms=spec.get('poms',[])
+    sizes=list(dict.fromkeys(str(size) for size in spec.get('sizes',[])))
+    sizes=sorted(sizes,key=_size_sort_key)
+    title('ЭТАЛОН — оцифрованная спецификация')
+    for offset in range(0,max(1,len(sizes)),4):
+        chunk=sizes[offset:offset+4]
+        cells(['Код','Описание','Допуск −','Допуск +']+chunk+['']*(4-len(chunk)),True)
+        for pom in poms:
+            values=pom.get('specs') or {}
+            cells([pom.get('code',''),pom.get('description',''),_to_number(pom.get('tol_minus')),
+                   _to_number(pom.get('tol_plus'))]+[_to_number(values.get(size)) for size in chunk]+['']*(4-len(chunk)))
+        row+=1
+    title('ПРОВЕРЕННЫЕ ОБРАЗЦЫ')
+    if not samples:
+        title('Проверенные образцы пока отсутствуют','64748B')
+    for size in sorted({str(sample.get('size','')) for sample in samples},key=_size_sort_key):
+        group=[sample for sample in samples if str(sample.get('size',''))==size]
+        title(f'РАЗМЕР {size} — образцов: {len(group)}')
+        for sample in group:
+            items=sample.get('items',[])
+            passed=bool(items) and all(item.get('status')=='PASS' for item in items)
+            title(f"Образец #{sample.get('sample_no','')} — {'В НОРМЕ' if passed else 'ТРЕБУЕТ ВНИМАНИЯ'}",'166534' if passed else '92400E')
+            cells(['Код','Описание','Эталон','Факт','Отклонение','Допуск −','Допуск +','Результат'],True)
+            lookup={str(pom.get('code','')):pom for pom in poms}
+            for item in items:
+                pom=lookup.get(str(item.get('code','')),{})
+                status=item.get('status','NOT_MEASURED')
+                cells([item.get('code',''),item.get('desc') or pom.get('description',''),
+                       _to_number((pom.get('specs') or {}).get(size)),item.get('actual') if item.get('actual') is not None else '—',
+                       item.get('diff') if item.get('diff') is not None else '—',_to_number(pom.get('tol_minus')),
+                       _to_number(pom.get('tol_plus')),MEASURE_STATUS_LABELS.get(status,status)])
+                color,fg=('DCFCE7','166534') if status=='PASS' else ('FEE2E2','991B1B') if status=='FAIL' else ('FEF3C7','92400E')
+                for col in (6,9):
+                    ws.cell(row-1,col).fill=PatternFill('solid',fgColor=color)
+                    ws.cell(row-1,col).font=Font(name='Calibri',size=9,bold=True,color=fg)
+            row+=1
+    _frame_report(ws,row-1,9)
+    ws.freeze_panes='D5'
+    return ws
 
 def create_full_qc_report(
     report_data: dict, 
@@ -267,95 +323,9 @@ def create_full_qc_report(
 
     curr_row += 1
 
-    # 3. Размерная сетка (Spec Sheet)
-    if spec_data and measured_samples:
-        ws.merge_cells(start_row=curr_row, start_column=2, end_row=curr_row, end_column=9)
-        ws.row_dimensions[curr_row].height = 24
-        sec_cell = ws.cell(row=curr_row, column=2, value="GARMENT MEASUREMENT & TOLERANCE SPEC SHEET")
-        sec_cell.fill = PatternFill(start_color=c_header, fill_type="solid")
-        sec_cell.font = Font(name="Calibri", size=10, bold=True, color="FFFFFF")
-        sec_cell.alignment = Alignment(horizontal="left", vertical="center", indent=1)
-        apply_range_style(ws, 2, curr_row, 9, curr_row, border=thin_border)
-        curr_row += 1
-
-        ws.row_dimensions[curr_row].height = 20
-        spec_headers = [
-            (2, 2, "Code"),
-            (3, 5, "POM Description"),
-            (6, 6, "Tol (-)"),
-            (7, 7, "Tol (+)")
-        ]
-        for s_col, e_col, h_name in spec_headers:
-            if s_col != e_col:
-                ws.merge_cells(start_row=curr_row, start_column=s_col, end_row=curr_row, end_column=e_col)
-            c = ws.cell(row=curr_row, column=s_col, value=h_name)
-            c.fill = PatternFill(start_color=c_sub, fill_type="solid")
-            c.font = Font(name="Calibri", size=9, bold=True, color="FFFFFF")
-            c.alignment = Alignment(horizontal="center", vertical="center")
-            apply_range_style(ws, s_col, curr_row, e_col, curr_row, border=thin_border)
-
-        sample_col = 8
-        for sample in measured_samples:
-            ws.cell(row=curr_row, column=sample_col, value=f"#{sample['sample_no']} ({sample['size']}) Act").font = Font(name="Calibri", size=8, bold=True, color="FFFFFF")
-            ws.cell(row=curr_row, column=sample_col).fill = PatternFill(start_color=c_sub, fill_type="solid")
-            ws.cell(row=curr_row, column=sample_col).alignment = Alignment(horizontal="center", vertical="center")
-            ws.cell(row=curr_row, column=sample_col).border = thin_border
-
-            ws.cell(row=curr_row, column=sample_col + 1, value="Diff").font = Font(name="Calibri", size=8, bold=True, color="FFFFFF")
-            ws.cell(row=curr_row, column=sample_col + 1).fill = PatternFill(start_color=c_sub, fill_type="solid")
-            ws.cell(row=curr_row, column=sample_col + 1).alignment = Alignment(horizontal="center", vertical="center")
-            ws.cell(row=curr_row, column=sample_col + 1).border = thin_border
-            sample_col += 2
-
-        curr_row += 1
-
-        for pom in spec_data.get("poms", []):
-            ws.row_dimensions[curr_row].height = 18
-            ws.cell(row=curr_row, column=2, value=pom.get("code", "")).alignment = Alignment(horizontal="center", vertical="center")
-            ws.cell(row=curr_row, column=2).border = thin_border
-            
-            ws.merge_cells(start_row=curr_row, start_column=3, end_row=curr_row, end_column=5)
-            ws.cell(row=curr_row, column=3, value=pom.get("description", "")).alignment = Alignment(horizontal="left", vertical="center")
-            apply_range_style(ws, 3, curr_row, 5, curr_row, border=thin_border)
-
-            ws.cell(row=curr_row, column=6, value=f"-{pom.get('tol_minus')}" if pom.get('tol_minus') is not None else "—").alignment = Alignment(horizontal="center", vertical="center")
-            ws.cell(row=curr_row, column=7, value=f"+{pom.get('tol_plus')}" if pom.get('tol_plus') is not None else "—").alignment = Alignment(horizontal="center", vertical="center")
-            ws.cell(row=curr_row, column=6).border = thin_border
-            ws.cell(row=curr_row, column=7).border = thin_border
-
-            s_col = 8
-            for sample in measured_samples:
-                item = next((x for x in sample.get("items", []) if x.get("code") == pom.get("code")), None)
-                if item:
-                    st_code = item.get("status")
-                    act_val = item.get("actual")
-                    diff_val = item.get("diff")
-                    if st_code not in ("PASS", "FAIL"):
-                        # Нет полноценного результата: не измерено / ошибка ввода / нет эталона.
-                        act_val = act_val if (st_code == "NO_TARGET" and act_val is not None) else "—"
-                        diff_val = "—"
-                    c_act = ws.cell(row=curr_row, column=s_col, value=act_val if act_val is not None else "—")
-                    c_diff = ws.cell(row=curr_row, column=s_col + 1, value=diff_val if diff_val is not None else "—")
-                    
-                    c_act.border = thin_border
-                    c_diff.border = thin_border
-                    c_act.alignment = Alignment(horizontal="center", vertical="center")
-                    c_diff.alignment = Alignment(horizontal="center", vertical="center")
-                    c_act.font = Font(name="Calibri", size=9)
-
-                    if st_code == "FAIL":
-                        c_diff.fill = PatternFill(start_color=c_fail_bg, fill_type="solid")
-                        c_diff.font = Font(name="Calibri", size=9, bold=True, color=c_fail_fg)
-                    elif st_code == "PASS":
-                        c_diff.fill = PatternFill(start_color=c_pass_bg, fill_type="solid")
-                        c_diff.font = Font(name="Calibri", size=9, bold=True, color=c_pass_fg)
-                    else:
-                        c_diff.fill = PatternFill(start_color="E5E7EB", fill_type="solid")
-                        c_diff.font = Font(name="Calibri", size=9, bold=True, color="4B5563")
-                s_col += 2
-
-            curr_row += 1
-        curr_row += 1
+    # Measurements are stored on their own sheet, not across the main report.
+    if spec_data:
+        _create_measurements_sheet(wb, spec_data, measured_samples or [], report_data)
 
     # 4. Фотоматериалы: три фотографии в ряд, сгруппированные по секциям
     section_titles = {
@@ -365,11 +335,11 @@ def create_full_qc_report(
         "defects": "DEFECT DETAILS & LOG"
     }
 
-    ws.column_dimensions["J"].width = 15
+    for letter in 'BCDEFGHIJ':
+        ws.column_dimensions[letter].width = 15
     for key, title in section_titles.items():
-        photos = photos_by_section.get(key, [])
-        if photos:
-            curr_row = _draw_report_photo_section(ws, curr_row, title, photos)
+        if photos_by_section.get(key):
+            curr_row = _photo_section(ws, curr_row, title, photos_by_section[key])
 
     # 5. Отдельные блоки комментариев инспектора и заключения
     def add_text_block(title: str, text: str, row: int) -> int:
@@ -409,7 +379,13 @@ def create_full_qc_report(
         result_cell.fill = PatternFill(start_color=c_pend_fg, end_color=c_pend_fg, fill_type="solid")
     apply_range_style(ws, 2, curr_row, 9, curr_row, border=thin_border)
 
-    _finish_report_layout(ws, curr_row)
+    # Extend full-width headers and text blocks to the photo-grid edge.
+    for merged in list(ws.merged_cells.ranges):
+        if merged.max_col == 9:
+            left, top, bottom = merged.min_col, merged.min_row, merged.max_row
+            ws.unmerge_cells(str(merged))
+            ws.merge_cells(start_row=top, end_row=bottom, start_column=left, end_column=10)
+    _frame_report(ws, curr_row)
     out = io.BytesIO()
     wb.save(out)
     return out.getvalue()
@@ -635,14 +611,14 @@ def append_photos_to_existing_excel(excel_bytes: bytes, new_photos: list[tuple[s
                 ws.unmerge_cells(str(merged))
         ws.delete_rows(start_row, ws.max_row - start_row + 1)
 
-    for col_letter in ["B", "C", "D", "E", "F", "G", "H", "I", "J"]:
-        ws.column_dimensions[col_letter].width = 15
-    c_header, c_sub = "334155", "475569"
-    thin_border = Border(*( [Side(style="thin", color="CBD5E1")] * 4 ))
-    row = start_row
-    for section_key, section_title in section_order:
-        if grouped[section_key]:
-            row = _draw_report_photo_section(ws, row, section_key, grouped[section_key])
+    c_header, c_sub = '334155', '475569'
+    thin_border = Border(*([Side(style='thin',color='CBD5E1')]*4))
+    for letter in 'BCDEFGHIJ':
+        ws.column_dimensions[letter].width=15
+    row=start_row
+    for key,title in section_order:
+        if grouped[key]:
+            row=_photo_section(ws,row,key,grouped[key])
 
     # Обновляем отдельные текстовые блоки и дублируем результат внизу.
     row += 1
@@ -677,7 +653,7 @@ def append_photos_to_existing_excel(excel_bytes: bytes, new_photos: list[tuple[s
     ws.row_dimensions[row].height = 28
     apply_range_style(ws, 2, row, 10, row, border=thin_border)
 
-    _finish_report_layout(ws, row)
+    _frame_report(ws, row)
     output = io.BytesIO()
     wb.save(output)
     wb.close()
@@ -850,27 +826,18 @@ def render_clickable_photo_gallery(photos: list, height: int | None = None) -> N
 <div class="photo-wrap"><button class="action arrow" id="prev">←</button><img class="big" id="big" alt="Увеличенная фотография"><button class="action arrow" id="next">→</button></div></div>
 <script>
 const photos = {gallery_json}; let current = 0;
-let viewerRoot=document,viewerHost=null,viewerDoc=document;
-try{{
- const d=window.parent.document;
- if(d!==document){{
-  viewerHost=d.createElement('div');viewerHost.style.cssText='position:fixed;inset:0;z-index:2147483647;display:none';
-  viewerRoot=viewerHost.attachShadow({{mode:'open'}});
-  const css=document.createElement('style');css.textContent=document.querySelector('style').textContent;
-  viewerRoot.append(css,document.getElementById('overlay').cloneNode(true));d.body.append(viewerHost);viewerDoc=d;
- }}
-}}catch(e){{console.warn('Using iframe fullscreen fallback',e)}}
-const gallery=document.getElementById('gallery'),overlay=viewerRoot.getElementById('overlay'),big=viewerRoot.getElementById('big'),counter=viewerRoot.getElementById('counter');
-function fitPhoto(){{
- if(!big.naturalWidth || !overlay.classList.contains('open'))return;
- const area=big.parentElement,scale=Math.min(area.clientWidth/big.naturalWidth,area.clientHeight/big.naturalHeight);
- big.style.width=`${{big.naturalWidth*scale}}px`;big.style.height=`${{big.naturalHeight*scale}}px`;
-}}
-big.addEventListener('load',fitPhoto);
-const resizeObserver=new ResizeObserver(fitPhoto);resizeObserver.observe(big.parentElement);
-function closeViewer(){{overlay.classList.remove('open');if(viewerHost)viewerHost.style.display='none';if(document.fullscreenElement && document.exitFullscreen)document.exitFullscreen().catch(()=>{{}})}}
+let root=document,host=null,keyDocument=document;
+try{{if(window.parent.document!==document){{
+ const d=window.parent.document;host=d.createElement('div');host.style.cssText='position:fixed;inset:0;z-index:2147483647;display:none';
+ root=host.attachShadow({{mode:'open'}});const style=document.createElement('style');style.textContent=document.querySelector('style').textContent;
+ root.append(style,document.getElementById('overlay').cloneNode(true));d.body.append(host);keyDocument=d;
+}}}}catch(e){{console.warn(e)}}
+const gallery=document.getElementById('gallery'),overlay=root.getElementById('overlay'),big=root.getElementById('big'),counter=root.getElementById('counter');
+function fit(){{if(!big.naturalWidth||!overlay.classList.contains('open'))return;const area=big.parentElement,k=Math.min(area.clientWidth/big.naturalWidth,area.clientHeight/big.naturalHeight);big.style.width=`${{big.naturalWidth*k}}px`;big.style.height=`${{big.naturalHeight*k}}px`}}
+big.addEventListener('load',fit);const ro=new ResizeObserver(fit);ro.observe(big.parentElement);
+function closeViewer(){{overlay.classList.remove('open');if(host)host.style.display='none';if(document.fullscreenElement)document.exitFullscreen().catch(()=>{{}})}}
 
-function show(i){{current=(i+photos.length)%photos.length;big.src=photos[current].src;counter.textContent=`Фото ${{current+1}} из ${{photos.length}}`;overlay.classList.add('open');if(viewerHost)viewerHost.style.display='block';else if(!document.fullscreenElement && document.documentElement.requestFullscreen)document.documentElement.requestFullscreen().catch(()=>{{}});fitPhoto()}}
+function show(i){{current=(i+photos.length)%photos.length;big.src=photos[current].src;counter.textContent=`Фото ${{current+1}} из ${{photos.length}}`;overlay.classList.add('open');if(host)host.style.display='block';else if(!document.fullscreenElement&&document.documentElement.requestFullscreen)document.documentElement.requestFullscreen().catch(()=>{{}});fit()}}
 let lastSection = null;
 photos.forEach((p,i)=>{{
   if(p.section && p.section !== lastSection){{
@@ -881,17 +848,14 @@ photos.forEach((p,i)=>{{
   const label=document.createElement('span');label.textContent=p.label;
   b.appendChild(img);b.appendChild(label);b.addEventListener('click',()=>show(i));gallery.appendChild(b);
 }});
-viewerRoot.getElementById('close').addEventListener('click',closeViewer);
-viewerRoot.getElementById('prev').addEventListener('click',()=>show(current-1));viewerRoot.getElementById('next').addEventListener('click',()=>show(current+1));
-viewerDoc.addEventListener('keydown',e=>{{if(!overlay.classList.contains('open'))return;if(e.key==='Escape')closeViewer();if(e.key==='ArrowLeft')show(current-1);if(e.key==='ArrowRight')show(current+1)}});
-overlay.addEventListener('click',e=>{{if(e.target!==big && !e.target.closest('button'))closeViewer()}});
-window.addEventListener('pagehide',()=>{{resizeObserver.disconnect();if(viewerHost)viewerHost.remove()}});
-if(viewerHost && window.frameElement){{
- const frame=window.frameElement;
- const observer=new window.parent.MutationObserver(()=>{{if(!frame.isConnected){{viewerHost.remove();resizeObserver.disconnect();observer.disconnect()}}}});
- observer.observe(viewerDoc.body,{{childList:true,subtree:true}});
- window.addEventListener('pagehide',()=>observer.disconnect());
-}}
+root.getElementById('close').addEventListener('click',closeViewer);
+root.getElementById('prev').addEventListener('click',()=>show(current-1));root.getElementById('next').addEventListener('click',()=>show(current+1));
+function onKey(e){{if(!overlay.classList.contains('open'))return;if(e.key==='Escape')closeViewer();if(e.key==='ArrowLeft')show(current-1);if(e.key==='ArrowRight')show(current+1)}}
+keyDocument.addEventListener('keydown',onKey);
+overlay.addEventListener('click',e=>{{if(e.target!==big&&!e.target.closest('button'))closeViewer()}});
+function cleanup(){{ro.disconnect();keyDocument.removeEventListener('keydown',onKey);if(host)host.remove()}}
+window.addEventListener('pagehide',cleanup);
+if(host&&window.frameElement){{const frame=window.frameElement;const observer=new window.parent.MutationObserver(()=>{{if(!frame.isConnected){{cleanup();observer.disconnect()}}}});observer.observe(keyDocument.body,{{childList:true,subtree:true}});window.addEventListener('pagehide',()=>observer.disconnect())}}
 </script></body></html>'''
     components.html(html, height=max(300, min(height, 560)), scrolling=False)
 
@@ -1461,7 +1425,7 @@ with tab_new:
                 selected_size = st.selectbox("Размер проверяемого образца", spec.get("sizes", []), key=f"sz_{s_num}")
                 
                 inputs = {}
-                with st.form(key=f"sample_form_{s_num}"):
+                with st.form(key=f"sample_form_{s_num}_{selected_size}", enter_to_submit=False):
                     for pom in spec.get("poms", []):
                         p_code = pom.get("code", "")
                         p_desc = pom.get("description", "")
@@ -1476,7 +1440,8 @@ with tab_new:
                         inputs[p_code] = {
                             "val": c3.text_input(
                                 f"Замер {p_code}",
-                                placeholder=f"эталон {ideal_val}" if ideal_val is not None else "нет эталона",
+                                placeholder=str(ideal_val) if ideal_val is not None else "",
+                                key=f"measurement_{s_num}_{selected_size}_{p_code}",
                                 label_visibility="collapsed",
                             ),
                             "ideal": ideal_val,
@@ -1488,12 +1453,17 @@ with tab_new:
                     if st.form_submit_button("✓ Проверить образец"):
                         sample_items = []
                         for code, item_meta in inputs.items():
+                            raw_value = str(item_meta["val"] or "").strip()
+                            reference_value = _to_number(item_meta["ideal"])
+                            confirmed_reference = not raw_value and reference_value is not None
                             res = evaluate_measurement(
-                                item_meta["val"], item_meta["ideal"], item_meta["t_min"], item_meta["t_plus"]
+                                reference_value if confirmed_reference else raw_value,
+                                item_meta["ideal"], item_meta["t_min"], item_meta["t_plus"]
                             )
                             sample_items.append({
                                 "code": code,
                                 "desc": item_meta["desc"],
+                                "input_source": "confirmed_reference" if confirmed_reference else "manual",
                                 "actual": res["actual"],
                                 "diff": res["diff"],
                                 "status": res["status"],

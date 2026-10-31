@@ -796,11 +796,11 @@ def show_photo_viewer():
     index = int(st.session_state.get("photo_viewer_index", 0)) % len(photos)
     st.session_state.photo_viewer_index = index
 
-    # Диалог занимает около 80% ширины окна приложения; фото не растягивается по высоте.
+    # Увеличенный резервный диалог; основной просмотрщик вынесен за iframe.
     st.markdown(
         """<style>
-        div[role="dialog"] { width: 80vw !important; max-width: 80vw !important; min-width: 80vw !important; }
-        div[role="dialog"] img { max-height: 70vh; object-fit: contain; }
+        div[role="dialog"] { width: 98vw !important; max-width: 98vw !important; min-width: 0 !important; }
+        div[role="dialog"] img { max-height: 82dvh; object-fit: contain; }
         </style>""",
         unsafe_allow_html=True,
     )
@@ -872,19 +872,64 @@ def render_clickable_photo_gallery(photos: list, height: int | None = None) -> N
 .thumb{{border:0;background:transparent;color:inherit;cursor:pointer;text-align:center;padding:0;min-width:0}}
 .thumb img{{width:100%;height:110px;object-fit:cover;border-radius:8px;display:block;background:#222}}
 .thumb span{{display:block;font-size:12px;padding-top:3px;color:#b7b7b7}}
-.overlay{{display:none;position:fixed;inset:0;width:100%;height:100%;background:rgba(8,8,12,.98);z-index:9999;padding:18px;flex-direction:column;align-items:center;justify-content:center}}
+.overlay{{display:none;position:fixed;inset:0;width:100%;height:100%;background:rgba(8,8,12,.98);z-index:9999;padding:8px;flex-direction:column;align-items:center;justify-content:center}}
 .overlay.open{{display:flex}} .top{{width:100%;display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:10px}}
 .action{{border:1px solid #666;border-radius:8px;padding:9px 13px;background:#222;color:white;cursor:pointer;font-size:15px}}
-.photo-wrap{{display:flex;align-items:center;justify-content:center;gap:12px;width:100%;height:calc(100% - 45px);min-height:0}}
-.big{{max-width:calc(100% - 110px);max-height:100%;object-fit:contain;border-radius:5px}} .arrow{{font-size:25px;min-width:42px;padding:10px 5px}}
-@media(max-width:600px){{.gallery{{grid-template-columns:repeat(2,minmax(0,1fr))}}.thumb img{{height:96px}}.big{{max-width:calc(100% - 70px)}}.arrow{{min-width:30px}}}}
+.photo-wrap{{position:relative;display:flex;align-items:center;justify-content:center;width:100%;flex:1;min-height:0}}
+.big{{max-width:100%;max-height:100%;object-fit:contain;border-radius:5px}} .arrow{{position:absolute;top:50%;transform:translateY(-50%);z-index:2;font-size:25px;min-width:42px;padding:10px 5px;background:rgba(0,0,0,.55)}} #prev{{left:4px}} #next{{right:4px}}
+@media(max-width:600px){{.gallery{{grid-template-columns:repeat(2,minmax(0,1fr))}}.thumb img{{height:96px}}.big{{max-width:100%;max-height:100%}}.arrow{{min-width:30px}}}}
 </style></head><body><div class="gallery" id="gallery"></div>
 <div class="overlay" id="overlay" role="dialog" aria-modal="true"><div class="top"><span id="counter">Фото 1 из {len(items)}</span><button class="action" id="close">✕ Закрыть</button></div>
 <div class="photo-wrap"><button class="action arrow" id="prev">←</button><img class="big" id="big" alt="Увеличенная фотография"><button class="action arrow" id="next">→</button></div></div>
 <script>
 const photos = {gallery_json}; let current = 0;
-const gallery=document.getElementById('gallery'), overlay=document.getElementById('overlay'), big=document.getElementById('big'), counter=document.getElementById('counter');
-function show(i){{current=(i+photos.length)%photos.length;big.src=photos[current].src;counter.textContent=`Фото ${{current+1}} из ${{photos.length}}`;overlay.classList.add('open')}}
+const gallery=document.getElementById('gallery');
+let viewerRoot=document, viewerHost=null, viewerDocument=document, previousFocus=null;
+// Render outside the Streamlit iframe when same-origin access is available.
+try{{
+  const parentDocument=window.parent.document;
+  if(parentDocument!==document){{
+    viewerHost=parentDocument.createElement('div');
+    viewerHost.style.cssText='position:fixed;inset:0;z-index:2147483647;display:none';
+    const shadow=viewerHost.attachShadow({{mode:'open'}});
+    const style=document.createElement('style');
+    style.textContent=document.querySelector('style').textContent;
+    shadow.appendChild(style);
+    shadow.appendChild(document.getElementById('overlay').cloneNode(true));
+    parentDocument.body.appendChild(viewerHost);
+    viewerRoot=shadow;viewerDocument=parentDocument;
+  }}
+}}catch(error){{console.warn('Full-window viewer unavailable; using browser fullscreen fallback.',error)}}
+const overlay=viewerRoot.getElementById('overlay'),big=viewerRoot.getElementById('big'),counter=viewerRoot.getElementById('counter');
+function fitPhoto(){{
+  if(!big.naturalWidth || !overlay.classList.contains('open'))return;
+  const area=big.parentElement;
+  const scale=Math.min(area.clientWidth/big.naturalWidth,area.clientHeight/big.naturalHeight);
+  big.style.width=`${{big.naturalWidth*scale}}px`;
+  big.style.height=`${{big.naturalHeight*scale}}px`;
+}}
+big.addEventListener('load',fitPhoto);
+const viewerResize=new ResizeObserver(fitPhoto);viewerResize.observe(big.parentElement);
+function closeViewer(){{
+  overlay.classList.remove('open');
+  if(viewerHost)viewerHost.style.display='none';
+  if(document.fullscreenElement===document.documentElement && document.exitFullscreen)document.exitFullscreen().catch(()=>{{}});
+  if(previousFocus && previousFocus.isConnected)previousFocus.focus();
+}}
+function show(i){{
+  const wasOpen=overlay.classList.contains('open');
+  current=(i+photos.length)%photos.length;big.src=photos[current].src;
+  big.alt=photos[current].label;
+  counter.textContent=`Фото ${{current+1}} из ${{photos.length}}`;
+  if(viewerHost)viewerHost.style.display='block';
+  overlay.classList.add('open');
+  fitPhoto();
+  if(!wasOpen){{
+    previousFocus=document.activeElement;
+    viewerRoot.getElementById('close').focus();
+    if(!viewerHost && document.documentElement.requestFullscreen)document.documentElement.requestFullscreen().catch(()=>{{}});
+  }}
+}}
 let lastSection = null;
 photos.forEach((p,i)=>{{
   if(p.section && p.section !== lastSection){{
@@ -895,9 +940,39 @@ photos.forEach((p,i)=>{{
   const label=document.createElement('span');label.textContent=p.label;
   b.appendChild(img);b.appendChild(label);b.addEventListener('click',()=>show(i));gallery.appendChild(b);
 }});
-document.getElementById('close').addEventListener('click',()=>overlay.classList.remove('open'));
-document.getElementById('prev').addEventListener('click',()=>show(current-1));document.getElementById('next').addEventListener('click',()=>show(current+1));
-document.addEventListener('keydown',e=>{{if(!overlay.classList.contains('open'))return;if(e.key==='Escape')overlay.classList.remove('open');if(e.key==='ArrowLeft')show(current-1);if(e.key==='ArrowRight')show(current+1)}});
+viewerRoot.getElementById('close').addEventListener('click',closeViewer);
+viewerRoot.getElementById('prev').addEventListener('click',()=>show(current-1));
+viewerRoot.getElementById('next').addEventListener('click',()=>show(current+1));
+overlay.addEventListener('click',e=>{{if(!e.target.closest('button') && e.target!==big)closeViewer()}});
+function handleViewerKey(e){{
+  if(!overlay.classList.contains('open'))return;
+  if(e.key==='Escape'){{e.preventDefault();closeViewer()}}
+  if(e.key==='ArrowLeft'){{e.preventDefault();show(current-1)}}
+  if(e.key==='ArrowRight'){{e.preventDefault();show(current+1)}}
+  if(e.key==='Tab'){{
+    const buttons=Array.from(overlay.querySelectorAll('button'));
+    const active=viewerRoot.activeElement || document.activeElement;
+    const pos=buttons.indexOf(active);
+    e.preventDefault();buttons[(pos+(e.shiftKey?-1:1)+buttons.length)%buttons.length].focus();
+  }}
+}}
+viewerDocument.addEventListener('keydown',handleViewerKey);
+if(viewerDocument!==document)document.addEventListener('keydown',handleViewerKey);
+window.addEventListener('pagehide',()=>{{
+  viewerResize.disconnect();
+  viewerDocument.removeEventListener('keydown',handleViewerKey);
+  if(viewerHost)viewerHost.remove();
+}});
+if(viewerHost){{
+  const frame=window.frameElement;
+  if(frame){{
+    const observer=new window.parent.MutationObserver(()=>{{
+      if(!frame.isConnected){{viewerDocument.removeEventListener('keydown',handleViewerKey);viewerHost.remove();observer.disconnect()}}
+    }});
+    observer.observe(viewerDocument.body,{{childList:true,subtree:true}});
+    window.addEventListener('pagehide',()=>observer.disconnect());
+  }}
+}}
 </script></body></html>'''
     components.html(html, height=max(300, min(height, 560)), scrolling=False)
 
